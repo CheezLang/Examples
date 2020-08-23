@@ -11,7 +11,7 @@ use import std.time
 use import std.thread
 use import std.array
 use import std.profiling
-mem :: use import std.mem.allocator
+mem :: import std.mem.allocator
 io  :: import std.io
 C   :: import std.c
 
@@ -23,20 +23,20 @@ enable_profiler :: false
 report_progress :: false // if true save image every now end then
 real            :: double
 
-file_name :: "images/example1.bmp"
+file_name :: "images/example3.bmp"
 
 use_bhv     := true
 num_threads := 4
-grid_size   := 50
+grid_size   := 40
 
-scale  := 1
+scale  := 5
 width  := 192 * scale
 height := 108 * scale
-samples   := 500
+samples   := 256
 max_depth := 10
 
 // scenes: simple_light, cornell_box, basic_scene, random_scene, big_scene
-scene := cornell_box
+scene := random_scene
 
 // mutex for saving image during rendering
 file_write_mutex : ^Mutex = null
@@ -65,21 +65,21 @@ pathtracer2 :: () {
 
     // create mutex
     file_write_mutex = mem.alloc(Mutex)
-    defer mem.free(*file_write_mutex)
+    // defer mem.free(file_write_mutex)
     *file_write_mutex = Mutex.new()
-    defer Memory.drop(*file_write_mutex)
+    // defer Memory.drop(*file_write_mutex)
 
     // create global random
     global_random = mem.alloc(MTwister)
-    defer mem.free()
+    // defer mem.free(global_random)
     *global_random = MTwister.create(0)
-    defer Memory.drop(*global_random)
+    // defer Memory.drop(*global_random)
 
     // initialize C prng
     C.srand(C.time(null))
 
     image   := mem.alloc_n(double, cast width * height * 3)
-    defer mem.free_n(image)
+    // defer mem.free_n(image)
 
     cam_pos := vec3(20.0, 2.25, 5.0)
     lookat  := vec3(4.0, 1.0, 1.0)
@@ -206,9 +206,9 @@ color :: (r: Ray, world: ^Hittable, random: &Random, depth: int = 0) -> vec3 {
         }
 
         None -> {
-            // t : real = 0.5 * (r.direction.y + 1)
-            // vec3(1, 1, 1) * (1 - t) + vec3(0.5, 0.7, 1.0) * t
-            vec3(0.0, 0.0, 0.0)
+            t : real = 0.5 * (r.direction.y + 1)
+            vec3(1, 1, 1) * (1 - t) + vec3(0.5, 0.7, 1.0) * t
+            // vec3(0.0, 0.0, 0.0)
             // vec3(1, 1, 1)
         }
     }
@@ -219,12 +219,13 @@ random_scene :: (cam: &Camera) -> ^Hittable {
     cam_pos := vec3(20.0, 2.25, 5.0)
     lookat  := vec3(4.0, 1.0, 1.0)
     *cam = Camera.create(
-        cam_pos,
-        lookat,
-        10,
-        real(width) / real(height),
-        0.1,
-        vec3.mag(cam_pos - lookat))
+        pos          = cam_pos
+        lookat       = lookat
+        fov          = 10
+        aspect_ratio = real(width) / real(height)
+        aperture     = 0.125
+        focus_dist   = vec3.mag(cam_pos - lookat)
+    )
 
     //
     list := Array[^Hittable].create()
@@ -316,7 +317,7 @@ random_scene :: (cam: &Camera) -> ^Hittable {
 
     col : real = 1.0
     den : real = 0.075
-    list.add(ConstantMedium.create(box, den, ConstantTexture.create(vec3(col, col, col))))
+    // list.add(ConstantMedium.create(box, den, ConstantTexture.create(vec3(col, col, col))))
 
     if use_bhv {
         bhv := BhvNode.create(list.slice())
@@ -331,12 +332,13 @@ basic_scene :: (cam: &Camera) -> ^Hittable {
     cam_pos := vec3(20.0, 2.25, 5.0)
     lookat  := vec3(4.0, 1.0, 1.0)
     *cam = Camera.create(
-        cam_pos,
-        lookat,
-        10,
-        real(width) / real(height),
-        0.0,
-        vec3.mag(cam_pos - lookat))
+        pos          = cam_pos
+        lookat       = lookat
+        fov          = 10
+        aspect_ratio = real(width) / real(height)
+        aperture     = 0.0
+        focus_dist   = vec3.mag(cam_pos - lookat)
+    )
 
     list := Array[^Hittable].create()
     list.add(create_object(Hittable, Sphere(
@@ -386,10 +388,10 @@ basic_scene :: (cam: &Camera) -> ^Hittable {
 simple_light :: (cam: &Camera) -> ^Hittable {
     io.println("simple_light")
     *cam = Camera.create(
-        vec3(20.0, 4.0, 5.0),
-        vec3(4.0, 2.5, 1.0),
-        20,
-        real(width) / real(height)
+        pos          = vec3(20.0, 4.0, 5.0)
+        lookat       = vec3(4.0, 2.5, 1.0)
+        fov          = 20
+        aspect_ratio = real(width) / real(height)
     )
 
     list := Array[^Hittable].create()
@@ -428,12 +430,12 @@ simple_light :: (cam: &Camera) -> ^Hittable {
 cornell_box :: (cam: &Camera) -> ^Hittable {
     io.println("cornell_box")
     *cam = Camera.create(
-        vec3(278, 278, -800),
-        vec3(278, 278, 0),
-        40,
-        real(width) / real(height),
-        0,
-        10
+        pos          = vec3(278, 278, -800)
+        lookat       = vec3(278, 278, 0)
+        fov          = 40
+        aspect_ratio = real(width) / real(height)
+        aperture     = 0
+        focus_dist   = 10
     )
 
     // materials
@@ -445,11 +447,11 @@ cornell_box :: (cam: &Camera) -> ^Hittable {
     // room
     list := Array[^Hittable].create()
     list.add(FlipNormals.create(create_object(Hittable, YZRect(  0, 555,   0, 555, 555, green))))  // left
-    list.add(                    create_object(Hittable, YZRect(  0, 555,   0, 555,   0, red)))     // right
-    list.add(                    create_object(Hittable, ZXRect(213, 343, 227, 332, 554, light)))   // light
-    // list.add(FlipNormals.create(create_object(Hittable, ZXRect(  0, 555,   0, 555, 555, white))))  // ceiling
-    list.add(                    create_object(Hittable, ZXRect(  0, 555,   0, 555,   0, white)))   // floor
-    // list.add(FlipNormals.create(create_object(Hittable, XYRect(  0, 555,   0, 555, 555, white))))  // back
+    list.add(                   create_object(Hittable, YZRect(  0, 555,   0, 555,   0, red)))     // right
+    list.add(                   create_object(Hittable, ZXRect(213, 343, 227, 332, 554, light)))   // light
+    list.add(FlipNormals.create(create_object(Hittable, ZXRect(  0, 555,   0, 555, 555, white))))  // ceiling
+    list.add(                   create_object(Hittable, ZXRect(  0, 555,   0, 555,   0, white)))   // floor
+    list.add(FlipNormals.create(create_object(Hittable, XYRect(  0, 555,   0, 555, 555, white))))  // back
 
     // objects
     Box.create_faces(vec3(130, 0, 65), vec3(295, 165, 230), white, &list)
@@ -478,12 +480,12 @@ big_scene :: (cam: &Camera) -> ^Hittable {
     focus_dist := vec3.dot(vec3.normalized(look_at - cam_pos), focus_point - cam_pos) - 80
 
     *cam = Camera.create(
-        cam_pos,
-        look_at,
-        35,
-        real(width) / real(height),
-        15,
-        focus_dist
+        pos          = cam_pos
+        lookat       = look_at
+        fov          = 35
+        aspect_ratio = real(width) / real(height)
+        aperture     = 15
+        focus_dist   = focus_dist
     )
 
     list := Array[^Hittable].create()
