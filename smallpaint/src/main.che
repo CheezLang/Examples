@@ -1,0 +1,250 @@
+use import std.math
+use import std.array
+use import std.box
+use import std.random
+use import std.string
+use import std.random.mt
+mem :: import std.mem.allocator
+io :: import std.io
+fs :: import std.io.fs
+fmt :: import std.fmt
+
+Vec     :: Vector3[float]
+PI      :: 3.1415
+eps     :: 0.0001
+scale   :: 5
+width   :: 192 * scale
+height  :: 128 * scale
+samples :: 128
+file_name :: "images/out.ppm"
+
+Main :: () {
+    mt := MTwister.create(0)
+    mtwister = ^mt
+
+    image := mem.alloc_n(Vec, width * height)
+
+    scene := Array[Box[Obj]].create()
+    scene.add(Obj.new(Sphere.new(1.05, Vec(1.45, -0.75, -4.4)), Vec(0.5, 1, 0.5), 0, 2))
+    scene.add(Obj.new(Sphere.new(0.45, Vec(2.05, 0.8, -3.7)), Vec(10, 10, 1), 0, 3, 1.9))
+    scene.add(Obj.new(Sphere.new(0.6, Vec(1.95, -1.75, -3.1)), Vec(4, 4, 12), 0, 1))
+
+    scene.add(Obj.new(Sphere.new(100, Vec(0, -102.5, 0)), Vec(1, 1, 1), 0, 1)) // bottom
+    scene.add(Obj.new(Sphere.new(100, Vec(0, 103, 0)), Vec(1, 1, 1), 0, 1)) // top
+    scene.add(Obj.new(Sphere.new(100, Vec(0, 0, -105.5)), Vec(245.0/255.0, 236.0/255.0, 66.0/255.0), 0, 1)) // back
+    scene.add(Obj.new(Sphere.new(100, Vec(0, 0, 101.5)), Vec(1, 1, 1), 0, 1)) // front
+    scene.add(Obj.new(Sphere.new(100, Vec(-102.75, 0, 0)), Vec(1, 0.5, 0.5), 0, 1)) // left
+    scene.add(Obj.new(Sphere.new(100, Vec(102.75, 0, 0)), Vec(0.5, 1, 0.5), 0, 1)) // right
+
+    scene.add(Obj.new(Sphere.new(0.5, Vec(-1.9, 0, -3)), Vec(), 20, 1))
+    scene.add(Obj.new(Sphere.new(0.25, Vec(2.5, -2.25, -5.25)), Vec(), 20, 1))
+
+    exposure := 1.0f
+    cam_pos := Vec(0, 0, 0)
+
+    ppm_output := String.with_capacity(width * height * 20)
+    ppm_output += "P3`n"
+    fmt.format_into(&ppm_output, "{} {}`n", [width, height])
+    fmt.format_into(&ppm_output, "255`n")
+
+    for y in 0 .. height {
+        io.formatln("{} / {}", [y + 1, height])
+        for x in 0 .. width {
+            col := Vec()
+            for 0 .. samples {
+                cam := camcr(float(x), float(height - y - 1))
+                cam.x += next_float() / (width * 2)
+                cam.y += next_float() / (height * 2)
+                cam_dir := cam - cam_pos
+                cam_ray := Ray(cam_pos, cam_dir.normalized())
+                tmp := Vec()
+                trace(cam_ray, scene.slice(), 0, &tmp)
+                col += tmp / float(samples)
+            }
+            col *= exposure
+            col = col / (col + Vec(1, 1, 1))
+
+            fmt.format_into(&ppm_output, "{} {} {}`n", [
+                int(col.x * 255) | @bin_and(0xFF)
+                int(col.y * 255) | @bin_and(0xFF)
+                int(col.z * 255) | @bin_and(0xFF)
+            ])
+        }
+    }
+    fs.write_file(file_name, ppm_output.slice())
+}
+
+Ray :: struct #copy {
+    o : Vec
+    d : Vec
+}
+impl Ray {
+    new :: (o: Vec, d: Vec) -> Ray {
+        return Ray(o, d.normalized())
+    }
+}
+
+Obj :: trait {
+    cl          : Vec   = default
+    emission    : float = default
+    type        : int   = default
+    refr_index  : float = default
+
+    intersect :: (&Self, ray: Ray) -> float;
+    normal :: (&Self, vec: Vec) -> Vec;
+}
+impl Obj {
+    new :: (shape: $T, cl: Vec, emission: float, typ: int, refr_index: float = 1.0f) -> Box[Obj] {
+        shape.cl = cl
+        shape.emission = emission
+        shape.type = typ
+        shape.refr_index = refr_index
+        return Box[Obj].new(shape)
+    }
+}
+
+Sphere :: struct Obj {
+    c : Vec
+    r : float
+}
+impl Sphere {
+    new :: (r: float, p: Vec) -> Sphere {
+        return Sphere(
+            c = p
+            r = r
+        )
+    }
+}
+impl Obj for Sphere {
+    intersect :: (&Self, ray: Ray) -> float {
+        b := ((ray.o - c) * 2.0f).dot(ray.d)
+        c_ := (ray.o - c).dot(ray.o - c) - (r * r)
+        disc := b * b - 4.0f * c_
+        if disc < 0 {
+            return 0
+        } else {
+            disc = sqrtf(disc)
+        }
+        sol1 := -b + disc
+        sol2 := -b - disc
+        return if sol2 > eps then sol2 / 2
+        else if sol1 > eps then sol1 / 2
+        else 0
+    }
+
+    normal :: (&Self, p0: Vec) -> Vec {
+        return Vec(
+            x = (p0.x - c.x) / r
+            y = (p0.y - c.y) / r
+            z = (p0.z - c.z) / r
+        )
+    }
+}
+
+camcr :: (x: float, y: float) -> Vec {
+    w := width
+    h := height
+    fovx := cast(float) PI / 4.0
+    fovy := (float(h) / float(w)) * fovx
+    return Vec(
+        x = ((2 * x - float(w)) / float(w)) * tanf(fovx)
+        y = ((2 * y - float(h)) / float(h)) * tanf(fovy)
+        z = -1
+    )
+}
+
+hemisphere :: (u1: float, u2: float) -> Vec {
+    r := sqrtf(1.0 - u1 * u1)
+    phi := 2.0 * PI * u2
+    return Vec(
+        x = cosf(phi) * r
+        y = sinf(phi) * r
+        z = u1
+    )
+}
+
+trace :: (ray: Ray, scene: []Box[Obj], depth: int, clr: &Vec) {
+    if depth >= 20 {
+        return
+    }
+
+    rr_factor := 1.0f
+    if depth >= 5 {
+        rr_stop_probability := min(1.0f, 0.0625 * float(depth))
+        if next_float() <= rr_stop_probability {
+            return
+        }
+        rr_factor = 1.0f / (1.0f - rr_stop_probability)
+    }
+
+    id := -1
+    mint := float.max
+
+    for obj in scene {
+        t := obj.get().intersect(ray)
+        if t > eps and t < mint {
+            mint = t
+            id = it_index
+        }
+    }
+
+    if id == -1 {
+        *clr = Vec(0, 0, 0)
+        return
+    }
+    
+    obj := scene[id].get()
+    hp := ray.o + ray.d * mint
+    n := obj.normal(hp)
+    ray.o = hp + n * float(eps) * 2.0f
+    clr += Vec(obj.emission, obj.emission, obj.emission) * 2.0f
+
+    match obj.type {
+        1 -> {
+            ray.d = n + hemisphere(next_float(), next_float())
+            ray.d.normalize()
+            cost := ray.d.dot(n)
+            tmp := Vec()
+            trace(ray, scene, depth + 1, &tmp)
+            clr += tmp * obj.cl * (cost * rr_factor)
+        }
+
+        2 -> {
+            cost := ray.d.dot(n)
+            ray.d = (ray.d - n * (cost * 2)).normalized()
+            tmp := Vec()
+            trace(ray, scene, depth + 1, &tmp)
+            clr += tmp
+        }
+
+        3 -> {
+            ior := obj.refr_index
+            r0 := (1.0 - ior) / (1.0 + ior)
+            r0 = r0 * r0
+            if n.dot(ray.d) > 0 { // inside
+                n = -n
+                ior = 1.0 / ior
+            }
+            ior = 1.0 / ior
+            cosin := -n.dot(ray.d)
+            cost2 := 1.0 - ior * ior * (1.0 - cosin * cosin)
+            rprob := r0 + (1.0 - r0) * powf(1.0 - cosin, 5.0)
+            if cost2 > 0 and next_float() > rprob { // refraction
+                ray.d = (ray.d * ior) + (n * (ior * cosin - sqrtf(cost2)))
+            } else { // reflection
+                ray.d = (ray.d + n * (cosin * 2))
+            }
+            ray.d = ray.d.normalized()
+            tmp := Vec()
+            trace(ray, scene, depth + 1, &tmp)
+            clr += tmp
+        }
+
+        _ -> { return }
+    }
+}
+
+mtwister : ^MTwister = null
+next_float :: () -> float {
+    return cast double(mtwister.next_int()) / double(int.max)
+}
