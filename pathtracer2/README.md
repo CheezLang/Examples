@@ -1,6 +1,6 @@
 # Pathtracer2
 
-This project was developed following the books from [Raytracing in one Weekind](https://raytracing.github.io/)
+This project was developed following the books from [Raytracing in one Weekend](https://raytracing.github.io/)
 
 A multithreaded CPU based Monte Carlo Pathtracer.
 It supports multiple material types (diffuse, glossy, translucent, emissive), texture types (constant color, checkerboard), object types (spheres, boxes, planes, BHVs), homogeneous media and depth of field.
