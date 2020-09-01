@@ -1,0 +1,65 @@
+
+use import vulkan
+use import glfw
+
+use import std.array
+use import std.string
+
+io :: import std.io
+C :: import std.c
+
+glfw_error_callback :: (error: i32, description: ^mut char8) {
+    desc := String.from_cstring(description)
+    io.formatln("Glfw Error {}: {}", [error, desc.slice()])
+}
+
+vk :: (code: Code) #macro {
+    result := @insert(code)
+    if result != .Success {
+        io.formatln("Vulkan API call failed: {}", [result])
+    }
+}
+
+Main :: () {
+    glfwSetErrorCallback(glfw_error_callback)
+
+    if glfwInit() == 0 {
+        io.println("Failed to initialize GLFW")
+        return
+    }
+    defer glfwTerminate()
+
+    glfwWindowHint(GLFW_VISIBLE, 0)
+    glfwWindowHint(GLFW_RESIZABLE, 1)
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+
+    vidmode := glfwGetVideoMode(glfwGetPrimaryMonitor())
+    window := glfwCreateWindow(500, 500, "Vulkan Test", null, null)
+    if window == null {
+        io.println("Failed to create window")
+        return
+    }
+    defer glfwDestroyWindow(window)
+
+    // test vulkan
+    extension_count := 0u32
+    vkEnumerateInstanceExtensionProperties(null, ^extension_count, null)
+    io.formatln("{} extensions supported", [extension_count])
+
+    extension_props := Array[VkExtensionProperties].new(initial_capacity = cast extension_count)
+    extension_props.resize(cast extension_count)
+    vkEnumerateInstanceExtensionProperties(null, ^extension_count, cast extension_props.get_raw())
+
+    for prop in &mut extension_props {
+        name := String.from_cstring(prop.extensionName.data)
+        io.formatln("Vulkan extension '{}', version: {}", [name.slice(), prop.specVersion])
+    }
+
+    // show window
+    glfwShowWindow(window)
+
+    while glfwWindowShouldClose(window) == 0 {
+        glfwPollEvents()
+        // glfwSwapBuffers(window)
+    }
+}
