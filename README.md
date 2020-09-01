@@ -1,3 +1,3 @@
-# Vulkan Window
+# Examples
 
-Goal: Open window using GLFW and render something using Vulkan.
+Example projects for the Cheez programming language
