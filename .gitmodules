@@ -1,0 +1,6 @@
+[submodule "libraries/GLFW"]
+	path = libraries/GLFW
+	url = https://github.com/CheezLang/GLFW.git
+[submodule "libraries/vulkan"]
+	path = libraries/vulkan
+	url = https://github.com/CheezLang/vulkan.git
