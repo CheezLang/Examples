@@ -33,13 +33,27 @@ Main :: () {
     glfwWindowHint(GLFW_RESIZABLE, 1)
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
 
-    vidmode := glfwGetVideoMode(glfwGetPrimaryMonitor())
-    window := glfwCreateWindow(500, 500, "Vulkan Test", null, null)
+    mut monitors: []mut ^mut GLFWmonitor = []
+    monitors.data = glfwGetMonitors(cast ^mut monitors.length)
+
+    @assert(monitors.length > 0)
+
+    window_size : (x: i32, y: i32) = 500, 500
+    window := glfwCreateWindow(window_size.x, window_size.y, "Vulkan Test", null, null)
     if window == null {
         io.println("Failed to create window")
         return
     }
     defer glfwDestroyWindow(window)
+
+    // center window on monitor
+    {
+        monitor := *monitors[monitors.length - 1]
+        vidmode := glfwGetVideoMode(monitor)
+        monitor_pos : (x: i32, y: i32) = default
+        glfwGetMonitorPos(monitor, ^monitor_pos.x, ^monitor_pos.y)
+        glfwSetWindowPos(window, monitor_pos.x + vidmode.width / 2 - window_size.x / 2, monitor_pos.y + vidmode.height / 2 - window_size.y / 2)
+    }
 
     // test vulkan
     extension_count := 0u32
