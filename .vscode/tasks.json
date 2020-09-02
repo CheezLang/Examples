@@ -1,0 +1,22 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "Push-Location vulkan_window; ./build.ps1; Pop-Location"
+        },
+        {
+            "label": "build_and_run",
+            "type": "shell",
+            "command": "Push-Location vulkan_window; ./build.ps1; ./bin/vulkan_window.exe; Pop-Location"
+        },
+        {
+            "label": "run",
+            "type": "shell",
+            "command": "Push-Location vulkan_window; ./bin/vulkan_window.exe; Pop-Location"
+        }
+    ]
+}
