@@ -1,79 +1,1097 @@
-
-use import vulkan
-use import glfw
-
 use import std.array
+use import std.map
 use import std.string
+use import std.math
+use import std.matrix
 
-io :: import std.io
-C :: import std.c
+fmt :: import std.fmt
+io  :: import std.io
+C   :: import std.c
+fs  :: import std.io.fs
+
+use import glfw
+use import vulkan
+use import vulkan_utils
+
+MaxFramesInFlight :: 2
+
+enable_validation_layers :: true
+validation_layers := [
+    "VK_LAYER_KHRONOS_validation"c
+]
+device_extensions := [
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+]
 
 glfw_error_callback :: (error: i32, description: ^mut char8) {
     desc := String.from_cstring(description)
     io.formatln("Glfw Error {}: {}", [error, desc.slice()])
 }
 
-vk :: (code: Code) #macro {
-    result := @insert(code)
-    if result != .Success {
-        io.formatln("Vulkan API call failed: {}", [result])
+vulkan_debug_callback :: (
+    messageSeverity: VkDebugUtilsMessageSeverityFlagBitsEXT,
+    messageType: VkDebugUtilsMessageTypeFlagsEXT,
+    pCallbackData: ^VkDebugUtilsMessengerCallbackDataEXT,
+    pUserData: ^mut void) -> VkBool32 #stdcall {
+
+    if i32(messageSeverity) >= i32(VkDebugUtilsMessageSeverityFlagBitsEXT.WarningBitExt) {
+        level := match messageSeverity {
+            .VerboseBitExt  -> "Verbose"
+            .InfoBitExt     -> "Info"
+            .WarningBitExt  -> "Warning"
+            .ErrorBitExt    -> "Error"
+            _               -> "?"
+        }
+
+        io.formatln("[Vulkan {}] {}", [level, string.from_cstring(pCallbackData.pMessage)])
     }
+
+    return VK_FALSE
 }
 
 Main :: () {
-    glfwSetErrorCallback(glfw_error_callback)
+    hello_triangle_app := HelloTriangleApplication.new()
 
-    if glfwInit() == 0 {
-        io.println("Failed to initialize GLFW")
-        return
+    match hello_triangle_app.run() {
+        Ok(_) -> {}
+        Err($msg) -> {
+            io.formatln("[Vulkan Error] {}", [msg.slice()])
+        }
     }
-    defer glfwTerminate()
+}
 
-    glfwWindowHint(GLFW_VISIBLE, 0)
-    glfwWindowHint(GLFW_RESIZABLE, 1)
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+QueueFamilyIndices :: struct {
+    graphics_family : Option[u32] = None
+    present_family  : Option[u32] = None
+}
 
-    mut monitors: []mut ^mut GLFWmonitor = []
-    monitors.data = glfwGetMonitors(cast ^mut monitors.length)
+impl QueueFamilyIndices {
+    is_complete :: (&Self) -> bool {
+        if self.graphics_family == .None {
+            return false
+        }
+        if self.present_family == .None {
+            return false
+        }
 
-    @assert(monitors.length > 0)
-
-    window_size : (x: i32, y: i32) = 500, 500
-    window := glfwCreateWindow(window_size.x, window_size.y, "Vulkan Test", null, null)
-    if window == null {
-        io.println("Failed to create window")
-        return
+        return true
     }
-    defer glfwDestroyWindow(window)
+}
 
-    // center window on monitor
-    {
-        monitor := *monitors[monitors.length - 1]
+HelloTriangleApplication :: struct {
+    // window stuff
+    window          : ^mut GLFWwindow = null
+    window_size     : (x: i32, y: i32) = 800, 600
+
+    current_frame       := 0
+    framebuffer_resized := false
+
+    // vulkan stuff
+    instance        : VkInstance = null
+    debug_messenger : VkDebugUtilsMessengerEXT = null
+    surface         : VkSurfaceKHR = null
+    physical_device : VkPhysicalDevice = null
+    device          : VkDevice = null
+    graphics_queue  : VkQueue = null
+    present_queue   : VkQueue = null
+    swapchain       : VkSwapchainKHR = null
+    swapchain_images        := Array[VkImage].new()
+    swapchain_image_views   := Array[VkImageView].new()
+    swapchain_framebuffers  := Array[VkFramebuffer].new()
+    swapchain_image_format  : VkFormat = default
+    swapchain_extent        : VkExtent2D = default
+    render_pass             : VkRenderPass = null
+    pipeline_layout         : VkPipelineLayout = null
+    graphics_pipeline       : VkPipeline = null
+    command_pool            : VkCommandPool = null
+    command_buffers         := Array[VkCommandBuffer].new()
+    sema_image_available    := Array[VkSemaphore].new()
+    sema_render_finished    := Array[VkSemaphore].new()
+    fences_in_flight        := Array[VkFence].new()
+    images_in_flight        := Array[VkFence].new()
+}
+
+impl HelloTriangleApplication {
+    new :: () -> HelloTriangleApplication {
+        return HelloTriangleApplication()
+    }
+
+    run :: (&mut Self) -> Result[(), String] {
+        defer self.cleanup()
+
+        // init stuff
+        try(self.init_window())
+        try(self.init_vulkan())
+
+        self.main_loop()
+
+        return Ok()
+    }
+    
+    cleanup_swapchain :: (&mut Self) {
+        for(by_ref=false) framebuffer in self.swapchain_framebuffers.slice() {
+            if framebuffer  != null then vkDestroyFramebuffer(device, framebuffer, null)
+        }
+
+        vkFreeCommandBuffers(self.device, self.command_pool, cast self.command_buffers.count(), self.command_buffers.get_raw_mut())
+
+        if graphics_pipeline!= null then vkDestroyPipeline(device, graphics_pipeline, null)
+        if pipeline_layout  != null then vkDestroyPipelineLayout(device, pipeline_layout, null)
+        if render_pass      != null then vkDestroyRenderPass(device, render_pass, null)
+        
+        for(by_ref=false) view in self.swapchain_image_views.slice() {
+            if view         != null then vkDestroyImageView(device, view, null)
+        }
+
+        if swapchain        != null then vkDestroySwapchainKHR(device, swapchain, null)
+    }
+
+    cleanup :: (&mut Self) {
+        self.cleanup_swapchain()
+
+        for i in 0 .. MaxFramesInFlight {
+            if *sema_render_finished[i] != null then vkDestroySemaphore(device, *sema_render_finished[i], null)
+            if *sema_image_available[i] != null then vkDestroySemaphore(device, *sema_image_available[i], null)
+            if *fences_in_flight[i] != null then vkDestroyFence(device, *fences_in_flight[i], null)
+        }
+
+        if command_pool     != null then vkDestroyCommandPool(device, command_pool, null)
+
+        if device           != null then vkDestroyDevice(device, null)
+        if surface          != null then vkDestroySurfaceKHR(instance, surface, null)
+        if enable_validation_layers then Vulkan.vkDestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null)
+        if instance         != null then vkDestroyInstance(instance, null)
+
+        // glfw
+        if window           != null then glfwDestroyWindow(window)
+        glfwTerminate()
+    }
+
+    main_loop :: (&mut Self) {
+        // show window
+        glfwShowWindow(window)
+
+        while glfwWindowShouldClose(window) == 0 {
+            glfwPollEvents()
+            draw_frame()
+        }
+
+        vkDeviceWaitIdle(self.device)
+    }
+
+    draw_frame :: (&mut Self) {
+        vkWaitForFences(self.device, 1, ^*self.fences_in_flight[self.current_frame], VK_TRUE, u64.max)
+
+        image_index : u32 = default
+        match vkAcquireNextImageKHR(self.device, self.swapchain, u64.max, *self.sema_image_available[self.current_frame], null, ^image_index) {
+            .Success -> {}
+            .SuboptimalKhr -> {}
+
+            .ErrorOutOfDateKhr -> {
+                self.recreate_swapchains()
+                return
+            }
+
+            $err -> {
+                io.formatln("[Vulkan Error] vkAcquireNextImageKHR returned {}", [err])
+                @assert(false)
+            }
+        }
+
+        // check if a previous frame is using this image
+        if *self.images_in_flight[i64(image_index)] != null {
+            vkWaitForFences(self.device, 1, ^*self.images_in_flight[i64(image_index)], VK_TRUE, u64.max)
+        }
+
+        // mark the image as now being in use by this frame
+        *self.images_in_flight[i64(image_index)] = *self.fences_in_flight[self.current_frame]
+
+        wait_semaphores := [*self.sema_image_available[self.current_frame]]
+        wait_stages := [VkPipelineStageFlagBits.ColorAttachmentOutputBit]
+        signal_semaphores := [*self.sema_render_finished[self.current_frame]]
+        submit_info := VkSubmitInfo(
+            sType                = .SubmitInfo
+            waitSemaphoreCount   = cast wait_semaphores.length
+            pWaitSemaphores      = wait_semaphores.data
+            pWaitDstStageMask    = wait_stages.data
+            commandBufferCount   = 1
+            pCommandBuffers      = ^*self.command_buffers[i64(image_index)]
+            signalSemaphoreCount = cast signal_semaphores.length
+            pSignalSemaphores    = signal_semaphores.data
+        )
+
+        vkResetFences(self.device, 1, ^*self.fences_in_flight[self.current_frame])
+        vk_assert(vkQueueSubmit(self.graphics_queue, 1, ^submit_info, *self.fences_in_flight[self.current_frame]))
+
+        swapchains := [self.swapchain]
+        present_info := VkPresentInfoKHR(
+            sType              = .PresentInfoKhr
+            waitSemaphoreCount = cast signal_semaphores.length
+            pWaitSemaphores    = signal_semaphores.data
+            swapchainCount     = cast swapchains.length
+            pSwapchains        = swapchains.data
+            pImageIndices      = ^image_index
+            pResults           = null
+        )
+
+        
+        match vkQueuePresentKHR(self.present_queue, ^present_info) {
+            .Success -> {}
+            .SuboptimalKhr -> {}
+
+            .ErrorOutOfDateKhr -> {
+                self.recreate_swapchains()
+                return
+            }
+
+            $err -> {
+                io.formatln("[Vulkan Error] vkQueuePresentKHR returned {}", [err])
+                @assert(false)
+            }
+        }
+
+        if self.framebuffer_resized {
+            self.recreate_swapchains()
+            return
+        }
+
+        self.current_frame = (self.current_frame + 1) % MaxFramesInFlight
+    }
+}
+
+// window stull
+impl HelloTriangleApplication {
+    init_window :: (&mut Self) -> Result[(), String] {
+        glfwSetErrorCallback(glfw_error_callback)
+
+        if glfwInit() == 0 {
+            return Err(fmt.format("Failed to initialize GLFW"))
+        }
+
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE)
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+
+        mut monitors: []mut ^mut GLFWmonitor = []
+        monitors.data = glfwGetMonitors(cast ^mut monitors.length)
+
+        @assert(monitors.length > 0)
+
+        window = glfwCreateWindow(self.window_size.x, self.window_size.y, "Vulkan Test", null, null)
+        if window == null {
+            return Err(fmt.format("Failed to create window"))
+        }
+
+        // center window on monitor
+        monitor := *monitors[0]
         vidmode := glfwGetVideoMode(monitor)
         monitor_pos : (x: i32, y: i32) = default
         glfwGetMonitorPos(monitor, ^monitor_pos.x, ^monitor_pos.y)
-        glfwSetWindowPos(window, monitor_pos.x + vidmode.width / 2 - window_size.x / 2, monitor_pos.y + vidmode.height / 2 - window_size.y / 2)
+        glfwSetWindowPos(window, monitor_pos.x + vidmode.width / 2 - self.window_size.x / 2, monitor_pos.y + vidmode.height / 2 - self.window_size.y / 2)
+
+        glfwSetWindowUserPointer(window, ^mut *self)
+
+        glfwSetWindowSizeCallback(window, (window, width, height) => {
+            app := cast(^mut HelloTriangleApplication) glfwGetWindowUserPointer(window)
+            app.framebuffer_resized = true
+        })
+
+        return Ok()
+    }
+}
+
+SwapChainSupportDetails :: struct {
+    capabilities    : VkSurfaceCapabilitiesKHR = default
+    formats         := Array[VkSurfaceFormatKHR].new()
+    present_modes   := Array[VkPresentModeKHR].new()
+}
+
+// vulkan stuff
+impl HelloTriangleApplication {
+    init_vulkan :: (&mut Self) -> Result[(), String] {
+        // self.print_supported_extensions()
+
+        try(self.create_instance())
+        try(self.create_debug_messenger())
+        try(self.create_surface())
+        try(self.pick_physical_device())
+        try(self.create_logical_device())
+        try(self.create_swapchain())
+        try(self.create_swapchain_image_views())
+        try(self.create_render_pass())
+        try(self.create_graphics_pipeline())
+        try(self.create_framebuffers())
+        try(self.create_command_pool())
+        try(self.create_command_buffers())
+        try(self.create_sync_objects())
+
+        return Ok()
     }
 
-    // test vulkan
-    extension_count := 0u32
-    vkEnumerateInstanceExtensionProperties(null, ^extension_count, null)
-    io.formatln("{} extensions supported", [extension_count])
+    recreate_swapchains :: (&mut Self) -> Result[(), String] {
+        self.framebuffer_resized = false
 
-    extension_props := Array[VkExtensionProperties].new(initial_capacity = cast extension_count)
-    extension_props.resize(cast extension_count)
-    vkEnumerateInstanceExtensionProperties(null, ^extension_count, cast extension_props.get_raw())
+        
+        mut width, height : (i32, i32) = default
+        glfwGetFramebufferSize(self.window, ^mut width, ^mut height)
+        while width == 0 or height == 0 {
+            glfwGetFramebufferSize(self.window, ^mut width, ^mut height)
+            glfwWaitEvents()
+        }
 
-    for prop in &mut extension_props {
-        name := String.from_cstring(prop.extensionName.data)
-        io.formatln("Vulkan extension '{}', version: {}", [name.slice(), prop.specVersion])
+        vkDeviceWaitIdle(self.device)
+
+        self.cleanup_swapchain()
+
+        try(self.create_swapchain())
+        try(self.create_swapchain_image_views())
+        try(self.create_render_pass())
+        try(self.create_graphics_pipeline())
+        try(self.create_framebuffers())
+        try(self.create_command_buffers())
+
+        return Ok()
     }
 
-    // show window
-    glfwShowWindow(window)
+    print_supported_extensions :: (&Self) {
+        extensions := Vulkan.enumerate_instance_extension_properties()
+        for prop in &mut extensions {
+            io.formatln("Vulkan extension '{}', version: {}", [string.from_cstring(prop.extensionName.data), prop.specVersion])
+        }
+    }
 
-    while glfwWindowShouldClose(window) == 0 {
-        glfwPollEvents()
-        // glfwSwapBuffers(window)
+    //////////////////////////////////////////
+    // stuff for creating instance
+    //////////////////////////////////////////
+
+    check_validation_layer_support :: (&mut Self) -> Result[(), String] {
+        supported_layers := Vulkan.enumerate_instance_layer_properties()
+
+        for layer in validation_layers[..] {
+            mut found := false
+            for prop in &mut supported_layers {
+                if string.from_cstring(layer) == string.from_cstring(prop.layerName.data) {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                return Err(fmt.format("Missing support for layer '{}'", [string.from_cstring(layer)]))
+            }
+        }
+
+        return Ok()
+    }
+
+    get_required_extensions :: (&mut Self) -> Array[^char8] {
+        mut glfw_extensions : []^char8 = default
+        glfw_extensions.data = glfwGetRequiredInstanceExtensions(cast ^mut glfw_extensions.length)
+
+        result := Array[^char8].new()
+        result.add_slice(glfw_extensions)
+        if enable_validation_layers {
+            result.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+        }
+
+        return result
+    }
+
+    create_instance :: (&mut Self) -> Result[(), String] {
+        if enable_validation_layers {
+            try(self.check_validation_layer_support())
+        }
+
+        app_info := VkApplicationInfo(
+            sType              = .ApplicationInfo
+            pNext              = null
+            pApplicationName   = "Hello Triangle"c
+            applicationVersion = VK_MAKE_VERSION(1, 0, 0)
+            pEngineName        = "No Engine"c
+            engineVersion      = VK_MAKE_VERSION(1, 0, 0)
+            apiVersion         = VK_MAKE_VERSION(1, 2, 0)
+        )
+
+        extensions := self.get_required_extensions()
+        debug_messenger_create_info := self.get_debug_messenger_create_info()
+
+        create_info := VkInstanceCreateInfo(
+            sType                   = .InstanceCreateInfo
+            pNext                   = if enable_validation_layers then cast(^void) ^debug_messenger_create_info else null
+            flags                   = 0
+            pApplicationInfo        = ^app_info
+            enabledLayerCount       = if enable_validation_layers then cast(u32) validation_layers.length else 0
+            ppEnabledLayerNames     = if enable_validation_layers then cast(^^char8) validation_layers.data else null
+            enabledExtensionCount   = cast extensions.count()
+            ppEnabledExtensionNames = extensions.get_raw()
+        )
+
+        vk_try(vkCreateInstance(^create_info, null, ^mut self.instance))
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating debug messenger
+    //////////////////////////////////////////
+
+    get_debug_messenger_create_info :: (&mut Self) -> VkDebugUtilsMessengerCreateInfoEXT {
+        use VkDebugUtilsMessageSeverityFlagBitsEXT
+        use VkDebugUtilsMessageTypeFlagBitsEXT
+        return VkDebugUtilsMessengerCreateInfoEXT(
+            sType           = .DebugUtilsMessengerCreateInfoExt
+            messageSeverity = u32(@bin_or(VerboseBitExt, InfoBitExt, WarningBitExt, ErrorBitExt))
+            messageType     = u32(@bin_or(GeneralBitExt, ValidationBitExt, PerformanceBitExt))
+            pfnUserCallback = vulkan_debug_callback
+            pUserData       = ^*self
+        )
+    }
+
+    create_debug_messenger :: (&mut Self) -> Result[(), String] {
+        if !enable_validation_layers {
+            return Ok()
+        }
+
+        create_info := self.get_debug_messenger_create_info()
+        vk_try(Vulkan.vkCreateDebugUtilsMessengerEXT(self.instance, ^create_info, null, ^self.debug_messenger))
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating surface
+    //////////////////////////////////////////
+
+    create_surface :: (&mut Self) -> Result[(), String] {
+        vk_try(glfwCreateWindowSurface(self.instance, self.window, null, ^mut self.surface))
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for physical device
+    //////////////////////////////////////////
+
+    find_queue_families :: (&mut Self, physical_device: VkPhysicalDevice) -> QueueFamilyIndices {
+        mut indices := QueueFamilyIndices()
+        queue_family_properties := Vulkan.get_physical_device_queue_family_properties(physical_device)
+
+        for props, i in &mut queue_family_properties {
+            // check graphics support
+            if @bin_and(props.queueFlags, u32(VkQueueFlagBits.GraphicsBit)) != 0 {
+                indices.graphics_family = Some(u32(i))
+            }
+
+            // check presentation support
+            mut present_support : VkBool32 = 0
+            vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, cast i, self.surface, ^mut present_support)
+            if present_support != 0 {
+                indices.present_family = Some(u32(i))
+            }
+
+            if indices.is_complete() {
+                return indices
+            }
+        }
+
+        return indices
+    }
+
+    check_device_extension_support :: (&mut Self, physical_device: VkPhysicalDevice) -> bool {
+        supported_extensions := Vulkan.enumerate_device_extension_properties(physical_device)
+
+        for layer in device_extensions[..] {
+            mut found := false
+            for prop in &mut supported_extensions {
+                if string.from_cstring(layer) == string.from_cstring(prop.extensionName.data) {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    is_physical_device_suitable :: (&mut Self, physical_device: VkPhysicalDevice) -> bool {
+        mut properties := VkPhysicalDeviceProperties()
+        mut features := VkPhysicalDeviceFeatures()
+        vkGetPhysicalDeviceProperties(physical_device, ^mut properties)
+        vkGetPhysicalDeviceFeatures(physical_device, ^mut features)
+
+        indices := self.find_queue_families(physical_device)
+        if !indices.is_complete() {
+            return false
+        }
+
+        if !self.check_device_extension_support(physical_device) {
+            return false
+        }
+
+        swapchain_support := self.query_swapchain_support(physical_device)
+        if swapchain_support.formats.count() == 0 or swapchain_support.present_modes.count() == 0 {
+            return false
+        }
+
+        return true
+    }
+
+    pick_physical_device :: (&mut Self) -> Result[(), String] {
+        physical_devices := try_with(Vulkan.enumerate_physical_devices(self.instance), { return Err(err) })
+        io.formatln("[Vulkan] {} physical devices found", [physical_devices.count()])
+
+        // pick first physical device thats suitable
+        for(by_ref=false) device in &mut physical_devices {
+            if self.is_physical_device_suitable(device) {
+                self.physical_device = device
+
+                mut properties := VkPhysicalDeviceProperties()
+                mut features := VkPhysicalDeviceFeatures()
+                vkGetPhysicalDeviceProperties(device, ^mut properties)
+                vkGetPhysicalDeviceFeatures(device, ^mut features)
+
+                io.formatln("[Vulkan] Picked physical device: {}", [string.from_cstring(properties.deviceName.data)])
+                io.formatln("[Vulkan]     api version   : {} {}", [properties.apiVersion, VK_EXTRACT_VERSION(properties.apiVersion)])
+                io.formatln("[Vulkan]     driver version: {} {}", [properties.driverVersion, VK_EXTRACT_VERSION(properties.driverVersion)])
+                io.formatln("[Vulkan]     device type   : {}", [properties.deviceType])
+                // io.formatln("[Vulkan]     limits        : {:?}", [properties.limits])
+                // io.formatln("[Vulkan]     features      : {:?}", [features])
+
+                return Ok()
+            }
+        }
+
+        return Err("No suitable physical device found".to_owned())
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating logical device
+    //////////////////////////////////////////
+
+    create_logical_device :: (&mut Self) -> Result[(), String] {
+        indices := self.find_queue_families(self.physical_device)
+
+        queue_create_infos := Array[VkDeviceQueueCreateInfo].new()
+
+        unique_queue_families := Map[u32, ()].new()
+        unique_queue_families.set(indices.graphics_family.unwrap(), ())
+        unique_queue_families.set(indices.present_family.unwrap(), ())
+
+        queue_priority := 1.0f
+        for kv in &unique_queue_families {
+            index, _ := kv
+            queue_create_infos.add(VkDeviceQueueCreateInfo(
+                sType               = .DeviceQueueCreateInfo
+                pNext               = null
+                flags               = 0
+                queueFamilyIndex    = *index
+                queueCount          = 1
+                pQueuePriorities    = ^queue_priority
+            ))
+        }
+
+        device_features := VkPhysicalDeviceFeatures()
+        
+        create_info := VkDeviceCreateInfo(
+            sType                   = .DeviceCreateInfo
+            pNext                   = null
+            flags                   = 0
+            queueCreateInfoCount    = cast queue_create_infos.count()
+            pQueueCreateInfos       = queue_create_infos.get_raw()
+
+            // this should not be required for vulkan 1.1 and later
+            enabledLayerCount       = if enable_validation_layers then cast(u32) validation_layers.length else 0
+            ppEnabledLayerNames     = if enable_validation_layers then cast(^^char8) validation_layers.data else null
+
+            enabledExtensionCount   = cast(u32) device_extensions.length
+            ppEnabledExtensionNames = cast(^^char8) device_extensions.data
+            pEnabledFeatures        = ^device_features
+        )
+
+        vk_try(vkCreateDevice(self.physical_device, ^create_info, null, ^mut self.device))
+
+        vkGetDeviceQueue(self.device, indices.graphics_family.unwrap(), 0, ^mut self.graphics_queue)
+        vkGetDeviceQueue(self.device, indices.present_family.unwrap(), 0, ^mut self.present_queue)
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating swapchain
+    //////////////////////////////////////////
+
+    query_swapchain_support :: (&mut Self, physical_device: VkPhysicalDevice) -> SwapChainSupportDetails {
+        mut details := SwapChainSupportDetails(
+            formats         = Vulkan.get_physical_device_surface_formats(physical_device, self.surface)
+            present_modes   = Vulkan.get_physical_device_surface_present_modes(physical_device, self.surface)
+        )
+
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, self.surface, ^mut details.capabilities)
+
+        return details
+    }
+
+    choose_swap_extent :: (&mut Self, capabilities: &VkSurfaceCapabilitiesKHR) -> VkExtent2D {
+        if capabilities.currentExtent.width != u32.max {
+            return capabilities.currentExtent
+        }
+
+        mut width, height : (i32, i32) = default
+        glfwGetFramebufferSize(self.window, ^mut width, ^mut height)
+
+        mut actual_extent := VkExtent2D(cast width, cast height)
+        actual_extent.width = clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width)
+        actual_extent.height = clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)
+
+        return actual_extent
+    }
+
+    choose_swap_present_mode :: (&mut Self, available_modes: &mut Array[VkPresentModeKHR]) -> VkPresentModeKHR {
+        for(by_ref=false) mode in available_modes {
+            if mode == .MailboxKhr {
+                return mode
+            }
+        }
+
+        return .FifoKhr
+    }
+
+    choose_swap_surface_format :: (&mut Self, available_formats: &mut Array[VkSurfaceFormatKHR]) -> VkSurfaceFormatKHR {
+        for format in available_formats {
+            if format.format == .B8g8r8a8Srgb and format.colorSpace == .SrgbNonlinearKhr {
+                return *format
+            }
+        }
+
+        return *available_formats[0]
+    }
+
+    create_swapchain :: (&mut Self) -> Result[(), String] {
+        mut swapchain_support := self.query_swapchain_support(self.physical_device)
+
+        surface_format := choose_swap_surface_format(&mut swapchain_support.formats)
+        present_mode := choose_swap_present_mode(&mut swapchain_support.present_modes)
+        extent := choose_swap_extent(&swapchain_support.capabilities)
+        mut image_count := swapchain_support.capabilities.minImageCount + 1
+        if swapchain_support.capabilities.maxImageCount > 0 and image_count > swapchain_support.capabilities.maxImageCount {
+            image_count = swapchain_support.capabilities.maxImageCount
+        }
+
+        // io.formatln("[Vulkan] swapchain surface format  : {}", [surface_format])
+        // io.formatln("[Vulkan] swapchain present mode    : {}", [present_mode])
+        // io.formatln("[Vulkan] swapchain extent          : {}", [extent])
+        // io.formatln("[Vulkan] swapchain image count     : {}", [image_count])
+
+        mut create_info := VkSwapchainCreateInfoKHR(
+            sType                   = .SwapchainCreateInfoKhr
+            pNext                   = null
+            flags                   = 0
+            surface                 = self.surface
+            minImageCount           = image_count
+            imageFormat             = surface_format.format
+            imageColorSpace         = surface_format.colorSpace
+            imageExtent             = extent
+            imageArrayLayers        = 1
+            imageUsage              = u32(VkImageUsageFlagBits.ColorAttachmentBit)
+            preTransform            = swapchain_support.capabilities.currentTransform
+            compositeAlpha          = .OpaqueBitKhr
+            presentMode             = present_mode
+            clipped                 = VK_TRUE
+            oldSwapchain            = null
+        )
+
+        indices := self.find_queue_families(self.physical_device)
+        queue_family_indices := [indices.graphics_family.unwrap(), indices.present_family.unwrap()]
+        if indices.graphics_family.unwrap() != indices.present_family.unwrap() {
+            create_info.imageSharingMode = .Concurrent
+            create_info.queueFamilyIndexCount = cast queue_family_indices.length
+            create_info.pQueueFamilyIndices = queue_family_indices.data
+        } else {
+            create_info.imageSharingMode = .Exclusive
+            create_info.queueFamilyIndexCount = 0
+            create_info.pQueueFamilyIndices = null
+        }
+
+        vk_try(vkCreateSwapchainKHR(self.device, ^create_info, null, ^mut self.swapchain))
+
+        // get handles to images in swapchain
+        vkGetSwapchainImagesKHR(self.device, self.swapchain, ^mut image_count, null)
+        self.swapchain_images.resize(cast image_count)
+        vkGetSwapchainImagesKHR(self.device, self.swapchain, ^mut image_count, self.swapchain_images.get_raw_mut())
+
+        self.swapchain_image_format = surface_format.format
+        self.swapchain_extent = extent
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating swapchain image views
+    //////////////////////////////////////////
+
+    create_swapchain_image_views :: (&mut Self) -> Result[(), String] {
+        self.swapchain_image_views.resize(self.swapchain_images.count())
+
+        for image, i in self.swapchain_images.slice() {
+            create_info := VkImageViewCreateInfo(
+                sType            = .ImageViewCreateInfo
+                pNext            = null
+                flags            = 0
+                image            = image
+                viewType         = ._2d
+                format           = self.swapchain_image_format
+                components       = VkComponentMapping(
+                    r = .Identity
+                    g = .Identity
+                    b = .Identity
+                    a = .Identity
+                )
+                subresourceRange = VkImageSubresourceRange(
+                    aspectMask     = u32(VkImageAspectFlagBits.ColorBit)
+                    baseMipLevel   = 0
+                    levelCount     = 1
+                    baseArrayLayer = 0
+                    layerCount     = 1
+                )
+            )
+
+            vk_try(vkCreateImageView(self.device, ^create_info, null, ^mut *self.swapchain_image_views[i]))
+        }
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating render pass
+    //////////////////////////////////////////
+
+    create_render_pass :: (&mut Self) -> Result[(), String] {
+        color_attachment := VkAttachmentDescription(
+            format         = self.swapchain_image_format
+            samples        = ._1Bit
+            loadOp         = .Clear
+            storeOp        = .Store
+            stencilLoadOp  = .DontCare
+            stencilStoreOp = .DontCare
+            initialLayout  = .Undefined
+            finalLayout    = .PresentSrcKhr
+        )
+
+        color_attachment_ref := VkAttachmentReference(
+            attachment = 0
+            layout     = .ColorAttachmentOptimal
+        )
+
+        subpass := VkSubpassDescription(
+            pipelineBindPoint       = .Graphics
+            inputAttachmentCount    = 0
+            pInputAttachments       = null
+            colorAttachmentCount    = 1
+            pColorAttachments       = ^color_attachment_ref
+            pResolveAttachments     = null
+            pDepthStencilAttachment = null
+            preserveAttachmentCount = 0
+            pPreserveAttachments    = null
+        )
+
+        dependency := VkSubpassDependency(
+            srcSubpass      = VK_SUBPASS_EXTERNAL
+            dstSubpass      = 0
+            srcStageMask    = .ColorAttachmentOutputBit
+            dstStageMask    = .ColorAttachmentOutputBit
+            srcAccessMask   = .None
+            dstAccessMask   = .ColorAttachmentWriteBit
+        )
+
+        render_pass_info := VkRenderPassCreateInfo(
+            sType           = .RenderPassCreateInfo
+            attachmentCount = 1
+            pAttachments    = ^color_attachment
+            subpassCount    = 1
+            pSubpasses      = ^subpass
+            dependencyCount = 1
+            pDependencies   = ^dependency
+        )
+
+        vk_try(vkCreateRenderPass(self.device, ^render_pass_info, null, ^mut self.render_pass))
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating pipeline
+    //////////////////////////////////////////
+
+    create_shader_module :: (&mut Self, code: []u8) -> Result[VkShaderModule, String] {
+        create_info := VkShaderModuleCreateInfo(
+            sType    = .ShaderModuleCreateInfo
+            pNext    = null
+            flags    = 0
+            codeSize = cast code.length
+            pCode    = cast(^u32) code.data
+        )
+
+        mut shader_module : VkShaderModule = default
+        vk_try(vkCreateShaderModule(self.device, ^create_info, null, ^mut shader_module))
+
+        return Ok(shader_module)
+    }
+
+    create_graphics_pipeline :: (&mut Self) -> Result[(), String] {
+        vert_shader_code := try_with(fs.read_file_binary("bin/triangle_vertex.spv"), { return Err(fmt.format("Failed to load vertex shader: {}", [err])) })
+        frag_shader_code := try_with(fs.read_file_binary("bin/triangle_fragment.spv"), { return Err(fmt.format("Failed to load fragment shader: {}", [err])) })
+
+        vert_shader_module := try(self.create_shader_module(vert_shader_code.slice()))
+        defer vkDestroyShaderModule(self.device, vert_shader_module, null)
+
+        frag_shader_module := try(self.create_shader_module(frag_shader_code.slice()))
+        defer vkDestroyShaderModule(self.device, frag_shader_module, null)
+
+        vert_shader_stage_info := VkPipelineShaderStageCreateInfo(
+            sType               = .PipelineShaderStageCreateInfo
+            stage               = .VertexBit
+            module              = vert_shader_module
+            pName               = "main"c
+        )
+
+        frag_shader_stage_info := VkPipelineShaderStageCreateInfo(
+            sType               = .PipelineShaderStageCreateInfo
+            stage               = .FragmentBit
+            module              = frag_shader_module
+            pName               = "main"c
+        )
+
+        shader_stages := [vert_shader_stage_info, frag_shader_stage_info]
+
+        vertex_input_info := VkPipelineVertexInputStateCreateInfo(
+            sType                           = .PipelineVertexInputStateCreateInfo
+            vertexBindingDescriptionCount   = 0
+            pVertexBindingDescriptions      = null
+            vertexAttributeDescriptionCount = 0
+            pVertexAttributeDescriptions    = null
+        )
+
+        input_assembly := VkPipelineInputAssemblyStateCreateInfo(
+            sType                  = .PipelineInputAssemblyStateCreateInfo
+            topology               = .TriangleList
+            primitiveRestartEnable = VK_FALSE
+        )
+
+        viewport := VkViewport(
+            x        = 0.0
+            y        = 0.0
+            width    = cast(float) self.swapchain_extent.width
+            height   = cast(float) self.swapchain_extent.height
+            minDepth = 0.0
+            maxDepth = 1.0
+        )
+
+        scissor := VkRect2D(
+            offset = VkOffset2D(0, 0)
+            extent = self.swapchain_extent
+        )
+
+        viewport_state := VkPipelineViewportStateCreateInfo(
+            sType         = .PipelineViewportStateCreateInfo
+            viewportCount = 1
+            pViewports    = ^viewport
+            scissorCount  = 1
+            pScissors     = ^scissor
+        )
+
+        rasterizer := VkPipelineRasterizationStateCreateInfo(
+            sType                   = .PipelineRasterizationStateCreateInfo
+            depthClampEnable        = VK_FALSE
+            rasterizerDiscardEnable = VK_FALSE
+            polygonMode             = .Fill
+            cullMode                = .BackBit
+            frontFace               = .Clockwise
+            depthBiasEnable         = VK_FALSE
+            depthBiasConstantFactor = 0.0
+            depthBiasClamp          = 0.0
+            depthBiasSlopeFactor    = 0.0
+            lineWidth               = 1.0
+        )
+
+        multisampling := VkPipelineMultisampleStateCreateInfo(
+            sType                 = .PipelineMultisampleStateCreateInfo
+            rasterizationSamples  = ._1Bit
+            sampleShadingEnable   = VK_FALSE
+            minSampleShading      = 1.0
+            pSampleMask           = null
+            alphaToCoverageEnable = VK_FALSE
+            alphaToOneEnable      = VK_FALSE
+        )
+
+        color_blend_attachment := VkPipelineColorBlendAttachmentState(
+            blendEnable         = VK_FALSE
+            srcColorBlendFactor = .One
+            dstColorBlendFactor = .Zero
+            colorBlendOp        = .Add
+            srcAlphaBlendFactor = .One
+            dstAlphaBlendFactor = .Zero
+            alphaBlendOp        = .Add
+            colorWriteMask      = .R or .G or .B or .A
+        )
+
+        color_blending := VkPipelineColorBlendStateCreateInfo(
+            sType           = .PipelineColorBlendStateCreateInfo
+            logicOpEnable   = VK_FALSE
+            logicOp         = .Copy
+            attachmentCount = 1
+            pAttachments    = ^color_blend_attachment
+            blendConstants  = [0.0, 0.0, 0.0, 0.0]
+        )
+
+        pipline_layout_info := VkPipelineLayoutCreateInfo(
+            sType                  = .PipelineLayoutCreateInfo
+            setLayoutCount         = 0
+            pSetLayouts            = null
+            pushConstantRangeCount = 0
+            pPushConstantRanges    = null
+        )
+
+        vk_try(vkCreatePipelineLayout(self.device, ^pipline_layout_info, null, ^mut self.pipeline_layout))
+
+        pipeline_info := VkGraphicsPipelineCreateInfo(
+            sType               = .GraphicsPipelineCreateInfo
+            stageCount          = 2
+            pStages             = shader_stages.data
+            pVertexInputState   = ^vertex_input_info
+            pInputAssemblyState = ^input_assembly
+            pTessellationState  = null
+            pViewportState      = ^viewport_state
+            pRasterizationState = ^rasterizer
+            pMultisampleState   = ^multisampling
+            pDepthStencilState  = null
+            pColorBlendState    = ^color_blending
+            pDynamicState       = null
+            layout              = self.pipeline_layout
+            renderPass          = self.render_pass
+            subpass             = 0
+            basePipelineHandle  = null
+            basePipelineIndex   = -1
+        )
+
+        vk_try(vkCreateGraphicsPipelines(self.device, null, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating framebuffers
+    //////////////////////////////////////////
+
+    create_framebuffers :: (&mut Self) -> Result[(), String] {
+        self.swapchain_framebuffers.resize(self.swapchain_image_views.count())
+
+        for(by_ref=false) view, i in self.swapchain_image_views.slice() {
+            attachments := [view]
+            framebuffer_info := VkFramebufferCreateInfo(
+                sType           = .FramebufferCreateInfo
+                renderPass      = self.render_pass
+                attachmentCount = 1
+                pAttachments    = attachments.data
+                width           = self.swapchain_extent.width
+                height          = self.swapchain_extent.height
+                layers          = 1
+            )
+
+            vk_try(vkCreateFramebuffer(self.device, ^framebuffer_info, null, ^mut *self.swapchain_framebuffers[i]))
+        }
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating command pool
+    //////////////////////////////////////////
+
+    create_command_pool :: (&mut Self) -> Result[(), String] {
+        queue_family_indices := find_queue_families(self.physical_device)
+
+        pool_info := VkCommandPoolCreateInfo(
+            sType            = .CommandPoolCreateInfo
+            queueFamilyIndex = queue_family_indices.graphics_family.unwrap()
+        )
+
+        vk_try(vkCreateCommandPool(self.device, ^pool_info, null, ^mut self.command_pool))
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating command buffers
+    //////////////////////////////////////////
+
+    create_command_buffers :: (&mut Self) -> Result[(), String] {
+        self.command_buffers.resize(self.swapchain_framebuffers.count())
+
+        alloc_info := VkCommandBufferAllocateInfo(
+            sType              = .CommandBufferAllocateInfo
+            commandPool        = self.command_pool
+            level              = .Primary
+            commandBufferCount = cast self.command_buffers.count()
+        )
+
+        vk_try(vkAllocateCommandBuffers(self.device, ^alloc_info, self.command_buffers.get_raw_mut()))
+
+        for(by_ref=false) framebuffer, i in self.swapchain_framebuffers.slice() {
+            begin_info := VkCommandBufferBeginInfo(
+                sType            = .CommandBufferBeginInfo
+                pInheritanceInfo = null
+            )
+
+            vk_try(vkBeginCommandBuffer(*command_buffers[i], ^begin_info))
+
+            clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
+            render_pass_info := VkRenderPassBeginInfo(
+                sType           = .RenderPassBeginInfo
+                renderPass      = self.render_pass
+                framebuffer     = framebuffer
+                renderArea      = VkRect2D(
+                    offset      = VkOffset2D(0, 0)
+                    extent      = self.swapchain_extent
+                )
+                clearValueCount = 1
+                pClearValues    = ^clear_color
+            )
+            vkCmdBeginRenderPass(*command_buffers[i], ^render_pass_info, .Inline)
+            vkCmdBindPipeline(*command_buffers[i], .Graphics, self.graphics_pipeline)
+            vkCmdDraw(*command_buffers[i], 3, 1, 0, 0)
+            vkCmdEndRenderPass(*command_buffers[i])
+            vk_try(vkEndCommandBuffer(*command_buffers[i]))
+        }
+
+
+        return Ok()
+    }
+
+    //////////////////////////////////////////
+    // stuff for creating semaphores
+    //////////////////////////////////////////
+
+    create_sync_objects :: (&mut Self) -> Result[(), String] {
+        self.sema_image_available.resize(MaxFramesInFlight)
+        self.sema_render_finished.resize(MaxFramesInFlight)
+        self.fences_in_flight.resize(MaxFramesInFlight)
+        self.images_in_flight.resize(self.swapchain_images.count())
+
+        semaphore_info := VkSemaphoreCreateInfo(
+            sType = .SemaphoreCreateInfo
+        )
+
+        fence_info := VkFenceCreateInfo(
+            sType = .FenceCreateInfo
+            flags = .SignaledBit
+        )
+
+        for i in 0 .. MaxFramesInFlight {
+            vk_try(vkCreateSemaphore(self.device, ^semaphore_info, null, ^mut *self.sema_image_available[i]))
+            vk_try(vkCreateSemaphore(self.device, ^semaphore_info, null, ^mut *self.sema_render_finished[i]))
+            vk_try(vkCreateFence(self.device, ^fence_info, null, ^mut *self.fences_in_flight[i]))
+        }
+
+        return Ok()
     }
 }

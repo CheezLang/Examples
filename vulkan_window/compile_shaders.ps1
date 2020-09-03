@@ -1,0 +1,2 @@
+&'D:\VulkanSDK\1.2.148.1\Bin\glslc'-o ./bin/triangle_vertex.spv -fshader-stage=vertex ./shaders/triangle_vertex.glsl
+&'D:\VulkanSDK\1.2.148.1\Bin\glslc'-o ./bin/triangle_fragment.spv -fshader-stage=fragment ./shaders/triangle_fragment.glsl

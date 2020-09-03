@@ -1,0 +1,141 @@
+use import std.array
+use import std.string
+
+fmt :: import std.fmt
+io  :: import std.io
+
+use import vulkan
+use import glfw
+
+#export_scope
+
+Vulkan :: struct {}
+
+// this function should be part of the glfw binding but the glfw binding doesn't include any vulkan specific stuff yet
+glfwCreateWindowSurface :: (instance: VkInstance, window: ^GLFWwindow, allocator: ^VkAllocationCallbacks, surface: ^mut VkSurfaceKHR) -> VkResult;
+
+vk :: (code: Code) #macro {
+    result := @insert(code)
+    if result != .Success {
+        io.formatln("Vulkan API call failed: {}", [result])
+    }
+}
+
+vk_assert :: (code: Code) #macro {
+    result := @insert(code)
+    if result != .Success {
+        io.formatln("Vulkan API call failed: {}", [result])
+        @assert(false)
+    }
+}
+
+vk_try :: (code: Code) #macro {
+    result := @insert(code)
+    if result != .Success {
+        match @function_type().return_type {
+            Result[$T, String] -> {}
+            _ -> @static_assert(false, "vk_try can only be called in a function returning Result[$T, String]")
+        }
+        return Err(fmt.format("Vulkan API call failed: {} ({})", [result, i32(result)]))
+    }
+}
+
+VK_EXTRACT_VERSION :: (version: u32) #macro {
+    cast ((major: u32, minor: u32, patch: u32)) (
+        version | @bin_lsr(_, 16) | @bin_and(0xFF),
+        version | @bin_lsr(_, 8) | @bin_and(0xFF),
+        version | @bin_lsr(_, 0) | @bin_and(0xFF)
+    )
+}
+
+impl Vulkan {
+    enumerate_instance_extension_properties :: () -> Array[VkExtensionProperties] {
+        count : u32 = default
+        vkEnumerateInstanceExtensionProperties(null, ^count, null)
+        mut result := Array[VkExtensionProperties].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkEnumerateInstanceExtensionProperties(null, ^count, result.get_raw_mut())
+        return result
+    }
+
+    enumerate_instance_layer_properties :: () -> Array[VkLayerProperties] {
+        count : u32 = default
+        vkEnumerateInstanceLayerProperties(^count, null)
+        mut result := Array[VkLayerProperties].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkEnumerateInstanceLayerProperties(^count, result.get_raw_mut())
+        return result
+    }
+
+    enumerate_physical_devices :: (instance: VkInstance) -> Result[Array[VkPhysicalDevice], String] {
+        count : u32 = default
+        vkEnumeratePhysicalDevices(instance, ^count, null)
+        if count == 0 {
+            return Err("No physical devices found".to_owned())
+        }
+        mut result := Array[VkPhysicalDevice].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkEnumeratePhysicalDevices(instance, ^count, result.get_raw_mut())
+        return Ok(result)
+    }
+
+    get_physical_device_queue_family_properties :: (physical_device: VkPhysicalDevice) -> Array[VkQueueFamilyProperties] {
+        count : u32 = default
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, ^count, null)
+        mut result := Array[VkQueueFamilyProperties].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, ^count, result.get_raw_mut())
+        return result
+    }
+
+    enumerate_device_extension_properties :: (physical_device: VkPhysicalDevice) -> Array[VkExtensionProperties] {
+        count : u32 = default
+        vkEnumerateDeviceExtensionProperties(physical_device, null, ^count, null)
+        mut result := Array[VkExtensionProperties].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkEnumerateDeviceExtensionProperties(physical_device, null, ^count, result.get_raw_mut())
+        return result
+    }
+
+    get_physical_device_surface_formats :: (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR) -> Array[VkSurfaceFormatKHR] {
+        count : u32 = default
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, ^count, null)
+        mut result := Array[VkSurfaceFormatKHR].new(initial_capacity = cast count)
+        result.resize(cast count)
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, ^count, result.get_raw_mut())
+        return result
+    }
+
+    get_physical_device_surface_present_modes :: (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR) -> Array[VkPresentModeKHR] {
+        count : u32 = default
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, ^count, null)
+        mut result := Array[VkPresentModeKHR].new(initial_capacity = cast count)
+        result.length = cast count // can't use resize because VkPresentModeKHR is an enum. @TODO: fix
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, ^count, result.get_raw_mut())
+        return result
+    }
+
+    load_vulkan_instance_proc :: (instance: VkInstance, name: ^char8, func: ^mut $FuncType) -> VkResult {
+        proc := vkGetInstanceProcAddr(instance, name)
+        if proc == null {
+            return .ErrorExtensionNotPresent
+        }
+        *func = cast(FuncType) proc
+        return .Success
+    }
+
+    vkCreateDebugUtilsMessengerEXT :: (instance: VkInstance, create_info: ^mut VkDebugUtilsMessengerCreateInfoEXT, allocator: ^mut VkAllocationCallbacks, debug_messenger: ^mut VkDebugUtilsMessengerEXT) -> VkResult {
+        mut vkCreateDebugUtilsMessengerEXT : PFN_vkCreateDebugUtilsMessengerEXT = null
+        result := load_vulkan_instance_proc(instance, "vkCreateDebugUtilsMessengerEXT", ^mut vkCreateDebugUtilsMessengerEXT)
+        if result != .Success {
+            return result
+        }
+        return vkCreateDebugUtilsMessengerEXT(instance, create_info, allocator, debug_messenger)
+    }
+
+    vkDestroyDebugUtilsMessengerEXT :: (instance: VkInstance, debug_messenger: VkDebugUtilsMessengerEXT, allocator: ^mut VkAllocationCallbacks) {
+        mut vkDestroyDebugUtilsMessengerEXT : PFN_vkDestroyDebugUtilsMessengerEXT = null
+        vk_assert(load_vulkan_instance_proc(instance, "vkDestroyDebugUtilsMessengerEXT", ^mut vkDestroyDebugUtilsMessengerEXT))
+        vkDestroyDebugUtilsMessengerEXT(instance, debug_messenger, allocator)
+    }
+}
