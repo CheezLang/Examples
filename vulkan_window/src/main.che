@@ -1,9 +1,11 @@
 use import std.array
 use import std.map
+use import std.box
 use import std.string
 use import std.math
 use import std.matrix
 
+mem :: import std.mem.allocator
 fmt :: import std.fmt
 io  :: import std.io
 C   :: import std.c
@@ -12,6 +14,8 @@ fs  :: import std.io.fs
 use import glfw
 use import vulkan
 use import vulkan_utils
+
+vk :: import vulkan_hl
 
 MaxFramesInFlight :: 2
 
@@ -50,13 +54,189 @@ vulkan_debug_callback :: (
 }
 
 Main :: () {
-    hello_triangle_app := HelloTriangleApplication.new()
-
-    match hello_triangle_app.run() {
-        Ok(_) -> {}
-        Err($msg) -> {
-            io.formatln("[Vulkan Error] {}", [msg.slice()])
+    window := match create_window(800, 600) {
+        Ok($window) -> window
+        Err($err) -> {
+            io.formatln("GLFW error: {}", [err.slice()])
+            return
         }
+    }
+
+    match app_main(window) {
+        Ok() -> {}
+
+        Err($err) -> {
+            io.formatln("Vulkan app failed with error {}", [&err])
+        }
+    }
+
+    // hello_triangle_app := HelloTriangleApplication.new()
+
+    // match hello_triangle_app.run() {
+    //     Ok(_) -> {}
+    //     Err($msg) -> {
+    //         io.formatln("[Vulkan Error] {}", [msg.slice()])
+    //     }
+    // }
+}
+
+app_main :: (window: ^GLFWwindow) -> Result[(), vk.Error] {
+    context := try(VulkanContext.new(window))
+
+    glfwShowWindow(cast window)
+    while glfwWindowShouldClose(cast window) == 0 {
+        glfwPollEvents()
+        // draw_frame()
+    }
+
+    io.formatln("ok")
+
+    return Ok()
+}
+
+create_window :: (width: int, height: int) -> Result[^GLFWwindow, String] {
+    glfwSetErrorCallback(glfw_error_callback)
+
+    window_size : (x: i32, y: i32) = i32(width), i32(height)
+
+    if glfwInit() == 0 {
+        return Err(fmt.format("Failed to initialize GLFW"))
+    }
+
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE)
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
+
+    mut monitors: []mut ^mut GLFWmonitor = []
+    monitors.data = glfwGetMonitors(cast ^mut monitors.length)
+
+    @assert(monitors.length > 0)
+
+    window := glfwCreateWindow(window_size.x, window_size.y, "Vulkan Test", null, null)
+    if window == null {
+        return Err(fmt.format("Failed to create window"))
+    }
+
+    // center window on monitor
+    monitor := *monitors[0]
+    vidmode := glfwGetVideoMode(monitor)
+    monitor_pos : (x: i32, y: i32) = default
+    glfwGetMonitorPos(monitor, ^monitor_pos.x, ^monitor_pos.y)
+    glfwSetWindowPos(window, monitor_pos.x + vidmode.width / 2 - window_size.x / 2, monitor_pos.y + vidmode.height / 2 - window_size.y / 2)
+
+    // glfwSetWindowUserPointer(window, ^mut *self)
+
+    // glfwSetWindowSizeCallback(window, (window, width, height) => {
+    //     app := cast(^mut HelloTriangleApplication) glfwGetWindowUserPointer(window)
+    //     app.framebuffer_resized = true
+    // })
+
+    return Ok(window)
+}
+
+VulkanContext :: struct {
+    instance        : vk.Instance
+    debug_messenger : vk.DebugUtilsMessenger
+    surface         : vk.Surface
+    physical_device : vk.PhysicalDevice
+    device          : vk.Device
+    graphics_queue  : vk.Queue
+    present_queue   : vk.Queue
+}
+
+impl Drop for VulkanContext {
+    drop :: (&Self) {
+        self.device.destroy()
+        self.surface.destroy()
+        self.debug_messenger.destroy()
+        self.instance.destroy()
+    }
+}
+
+impl VulkanContext {
+    new :: (window: ^GLFWwindow) -> Result[^mut VulkanContext, vk.Error] {
+        validation_info := vk.ValidationInfo(
+            message_severity = .VerboseBitExt or .InfoBitExt or .WarningBitExt or .ErrorBitExt
+            message_type     = .GeneralBitExt or .ValidationBitExt or .PerformanceBitExt
+            user_callback    = vulkan_debug_callback
+            user_data        = null
+        )
+
+
+        device_extensions := [string.from_cstring(VK_KHR_SWAPCHAIN_EXTENSION_NAME)]
+
+        extensions := Array[string].new()
+
+        // add extensions for glfw
+        mut glfw_extensions : []^char8 = default
+        glfw_extensions.data = glfwGetRequiredInstanceExtensions(cast ^mut glfw_extensions.length)
+        for glfw_ext in glfw_extensions {
+            extensions.add(string.from_cstring(glfw_ext))
+        }
+
+        instance := try(vk.Instance.new(
+            api_version = Some(vk.Version((1, 2, 0)))
+            validation  = Some(validation_info)
+            extensions = extensions[..]
+        ))
+
+        debug_messenger := try(instance.create_debug_messenger(validation_info))
+        surface := try(instance.create_surface_glfw(window))
+
+        // find suitable physical device
+        physical_devices := try(instance.enumerate_physical_devices())
+
+        suitable_physical_devices := vk.PhysicalDevice.filter_by_requirements(physical_devices[..],
+            extensions = device_extensions
+            queues     = [vk.QueueFlags.GraphicsBit or .TransferBit]
+            present    = Some(&surface)
+            swapchain  = Some(&surface)
+        )
+
+        if suitable_physical_devices.count() == 0 {
+            return Err(vk.Error.NoPhysicalDevice)
+        }
+
+        physical_device := *suitable_physical_devices[0]
+        graphics_families := physical_device.get_queue_families_with(.GraphicsBit or .TransferBit)
+        present_families := physical_device.get_queue_families_with_present(&surface)
+
+        graphics_family := *graphics_families[0]
+        present_family := *present_families[0]
+
+        // create device
+        unique_queue_families := Map[u32, ()].new()
+        unique_queue_families.set(graphics_family, ())
+        unique_queue_families.set(present_family, ())
+
+        queue_create_infos := Array[vk.DeviceQueueCreateInfo].new(unique_queue_families.count())
+        for kv in &unique_queue_families {
+            queue_create_infos.add(vk.DeviceQueueCreateInfo(
+                family      = *kv.key
+                priorities  = [1.0]
+            ))
+        }
+
+        features := VkPhysicalDeviceFeatures()
+        device := try(vk.Device.new(physical_device,
+            extensions = device_extensions
+            queues = queue_create_infos[..]
+            features = &features))
+
+        graphics_queue := device.get_queue(graphics_family)
+        present_queue := device.get_queue(present_family)
+
+        result := mem.alloc(VulkanContext)
+        *result = VulkanContext(
+            instance        = instance
+            debug_messenger = debug_messenger
+            surface         = surface
+            physical_device = *physical_device
+            device          = device
+            graphics_queue  = graphics_queue
+            present_queue   = present_queue
+        )
+        return Ok(result)
     }
 }
 
@@ -80,21 +260,22 @@ impl QueueFamilyIndices {
 
 HelloTriangleApplication :: struct {
     // window stuff
-    window          : ^mut GLFWwindow = null
-    window_size     : (x: i32, y: i32) = 800, 600
+    window                  : ^mut GLFWwindow = null
+    window_size             : (x: i32, y: i32) = 800, 600
 
-    current_frame       := 0
-    framebuffer_resized := false
+    current_frame           := 0
+    framebuffer_resized     := false
 
     // vulkan stuff
-    instance        : VkInstance = null
-    debug_messenger : VkDebugUtilsMessengerEXT = null
-    surface         : VkSurfaceKHR = null
-    physical_device : VkPhysicalDevice = null
-    device          : VkDevice = null
-    graphics_queue  : VkQueue = null
-    present_queue   : VkQueue = null
-    swapchain       : VkSwapchainKHR = null
+    context                 : ^VulkanContext = null
+    instance                : VkInstance = null
+    debug_messenger         : VkDebugUtilsMessengerEXT = null
+    surface                 : VkSurfaceKHR = null
+    physical_device         : VkPhysicalDevice = null
+    device                  : VkDevice = null
+    graphics_queue          : VkQueue = null
+    present_queue           : VkQueue = null
+    swapchain               : VkSwapchainKHR = null
     swapchain_images        := Array[VkImage].new()
     swapchain_image_views   := Array[VkImageView].new()
     swapchain_framebuffers  := Array[VkFramebuffer].new()
@@ -116,14 +297,14 @@ impl HelloTriangleApplication {
         return HelloTriangleApplication()
     }
 
-    run :: (&mut Self) -> Result[(), String] {
+    run :: (&mut Self) -> Result[(), vk.Error] {
         defer self.cleanup()
 
         // init stuff
-        try(self.init_window())
-        try(self.init_vulkan())
+        // try(self.init_window())
+        // self.context = try(VulkanContext.new(self.window))
 
-        self.main_loop()
+        // self.main_loop()
 
         return Ok()
     }
@@ -147,20 +328,22 @@ impl HelloTriangleApplication {
     }
 
     cleanup :: (&mut Self) {
-        self.cleanup_swapchain()
+        // self.cleanup_swapchain()
 
-        for i in 0 .. MaxFramesInFlight {
-            if *sema_render_finished[i] != null then vkDestroySemaphore(device, *sema_render_finished[i], null)
-            if *sema_image_available[i] != null then vkDestroySemaphore(device, *sema_image_available[i], null)
-            if *fences_in_flight[i] != null then vkDestroyFence(device, *fences_in_flight[i], null)
-        }
+        // for i in 0 .. MaxFramesInFlight {
+        //     if *sema_render_finished[i] != null then vkDestroySemaphore(device, *sema_render_finished[i], null)
+        //     if *sema_image_available[i] != null then vkDestroySemaphore(device, *sema_image_available[i], null)
+        //     if *fences_in_flight[i] != null then vkDestroyFence(device, *fences_in_flight[i], null)
+        // }
 
-        if command_pool     != null then vkDestroyCommandPool(device, command_pool, null)
+        // if command_pool     != null then vkDestroyCommandPool(device, command_pool, null)
 
-        if device           != null then vkDestroyDevice(device, null)
-        if surface          != null then vkDestroySurfaceKHR(instance, surface, null)
-        if enable_validation_layers then Vulkan.vkDestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null)
-        if instance         != null then vkDestroyInstance(instance, null)
+        // if device           != null then vkDestroyDevice(device, null)
+        // if surface          != null then vkDestroySurfaceKHR(instance, surface, null)
+        // if enable_validation_layers then Vulkan.vkDestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null)
+        // if instance         != null then vkDestroyInstance(instance, null)
+
+        
 
         // glfw
         if window           != null then glfwDestroyWindow(window)
@@ -397,13 +580,17 @@ impl HelloTriangleApplication {
     }
 
     create_instance :: (&mut Self) -> Result[(), String] {
+        mut supported_instance_version : u32 = default
+        vkEnumerateInstanceVersion(^mut supported_instance_version)
+
+        io.formatln("supported instance version: {} {}", [supported_instance_version, VK_EXTRACT_VERSION(supported_instance_version)])
+
         if enable_validation_layers {
             try(self.check_validation_layer_support())
         }
 
         app_info := VkApplicationInfo(
             sType              = .ApplicationInfo
-            pNext              = null
             pApplicationName   = "Hello Triangle"c
             applicationVersion = VK_MAKE_VERSION(1, 0, 0)
             pEngineName        = "No Engine"c
@@ -417,7 +604,6 @@ impl HelloTriangleApplication {
         create_info := VkInstanceCreateInfo(
             sType                   = .InstanceCreateInfo
             pNext                   = if enable_validation_layers then cast(^void) ^debug_messenger_create_info else null
-            flags                   = 0
             pApplicationInfo        = ^app_info
             enabledLayerCount       = if enable_validation_layers then cast(u32) validation_layers.length else 0
             ppEnabledLayerNames     = if enable_validation_layers then cast(^^char8) validation_layers.data else null
@@ -435,12 +621,10 @@ impl HelloTriangleApplication {
     //////////////////////////////////////////
 
     get_debug_messenger_create_info :: (&mut Self) -> VkDebugUtilsMessengerCreateInfoEXT {
-        use VkDebugUtilsMessageSeverityFlagBitsEXT
-        use VkDebugUtilsMessageTypeFlagBitsEXT
         return VkDebugUtilsMessengerCreateInfoEXT(
             sType           = .DebugUtilsMessengerCreateInfoExt
-            messageSeverity = u32(@bin_or(VerboseBitExt, InfoBitExt, WarningBitExt, ErrorBitExt))
-            messageType     = u32(@bin_or(GeneralBitExt, ValidationBitExt, PerformanceBitExt))
+            messageSeverity = .VerboseBitExt or .InfoBitExt or .WarningBitExt or .ErrorBitExt
+            messageType     = .GeneralBitExt or .ValidationBitExt or .PerformanceBitExt
             pfnUserCallback = vulkan_debug_callback
             pUserData       = ^*self
         )
@@ -461,7 +645,7 @@ impl HelloTriangleApplication {
     //////////////////////////////////////////
 
     create_surface :: (&mut Self) -> Result[(), String] {
-        vk_try(glfwCreateWindowSurface(self.instance, self.window, null, ^mut self.surface))
+        // vk_try(glfwCreateWindowSurface(self.instance, self.window, null, ^mut self.surface))
         return Ok()
     }
 
@@ -475,7 +659,7 @@ impl HelloTriangleApplication {
 
         for props, i in &mut queue_family_properties {
             // check graphics support
-            if @bin_and(props.queueFlags, u32(VkQueueFlagBits.GraphicsBit)) != 0 {
+            if VkQueueFlagBits.GraphicsBit is in props.queueFlags {
                 indices.graphics_family = Some(u32(i))
             }
 
@@ -582,8 +766,6 @@ impl HelloTriangleApplication {
             index, _ := kv
             queue_create_infos.add(VkDeviceQueueCreateInfo(
                 sType               = .DeviceQueueCreateInfo
-                pNext               = null
-                flags               = 0
                 queueFamilyIndex    = *index
                 queueCount          = 1
                 pQueuePriorities    = ^queue_priority
@@ -594,8 +776,6 @@ impl HelloTriangleApplication {
         
         create_info := VkDeviceCreateInfo(
             sType                   = .DeviceCreateInfo
-            pNext                   = null
-            flags                   = 0
             queueCreateInfoCount    = cast queue_create_infos.count()
             pQueueCreateInfos       = queue_create_infos.get_raw()
 
@@ -684,15 +864,13 @@ impl HelloTriangleApplication {
 
         mut create_info := VkSwapchainCreateInfoKHR(
             sType                   = .SwapchainCreateInfoKhr
-            pNext                   = null
-            flags                   = 0
             surface                 = self.surface
             minImageCount           = image_count
             imageFormat             = surface_format.format
             imageColorSpace         = surface_format.colorSpace
             imageExtent             = extent
             imageArrayLayers        = 1
-            imageUsage              = u32(VkImageUsageFlagBits.ColorAttachmentBit)
+            imageUsage              = VkImageUsageFlagBits.ColorAttachmentBit
             preTransform            = swapchain_support.capabilities.currentTransform
             compositeAlpha          = .OpaqueBitKhr
             presentMode             = present_mode
@@ -735,8 +913,6 @@ impl HelloTriangleApplication {
         for image, i in self.swapchain_images.slice() {
             create_info := VkImageViewCreateInfo(
                 sType            = .ImageViewCreateInfo
-                pNext            = null
-                flags            = 0
                 image            = image
                 viewType         = ._2d
                 format           = self.swapchain_image_format
@@ -747,7 +923,7 @@ impl HelloTriangleApplication {
                     a = .Identity
                 )
                 subresourceRange = VkImageSubresourceRange(
-                    aspectMask     = u32(VkImageAspectFlagBits.ColorBit)
+                    aspectMask     = VkImageAspectFlagBits.ColorBit
                     baseMipLevel   = 0
                     levelCount     = 1
                     baseArrayLayer = 0
@@ -825,8 +1001,6 @@ impl HelloTriangleApplication {
     create_shader_module :: (&mut Self, code: []u8) -> Result[VkShaderModule, String] {
         create_info := VkShaderModuleCreateInfo(
             sType    = .ShaderModuleCreateInfo
-            pNext    = null
-            flags    = 0
             codeSize = cast code.length
             pCode    = cast(^u32) code.data
         )

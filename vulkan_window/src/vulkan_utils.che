@@ -12,7 +12,7 @@ use import glfw
 Vulkan :: struct {}
 
 // this function should be part of the glfw binding but the glfw binding doesn't include any vulkan specific stuff yet
-glfwCreateWindowSurface :: (instance: VkInstance, window: ^GLFWwindow, allocator: ^VkAllocationCallbacks, surface: ^mut VkSurfaceKHR) -> VkResult;
+// glfwCreateWindowSurface :: (instance: VkInstance, window: ^GLFWwindow, allocator: ^VkAllocationCallbacks, surface: ^mut VkSurfaceKHR) -> VkResult #linkname("glfwCreateWindowSurface");
 
 vk :: (code: Code) #macro {
     result := @insert(code)
@@ -38,14 +38,6 @@ vk_try :: (code: Code) #macro {
         }
         return Err(fmt.format("Vulkan API call failed: {} ({})", [result, i32(result)]))
     }
-}
-
-VK_EXTRACT_VERSION :: (version: u32) #macro {
-    cast ((major: u32, minor: u32, patch: u32)) (
-        version | @bin_lsr(_, 16) | @bin_and(0xFF),
-        version | @bin_lsr(_, 8) | @bin_and(0xFF),
-        version | @bin_lsr(_, 0) | @bin_and(0xFF)
-    )
 }
 
 impl Vulkan {
