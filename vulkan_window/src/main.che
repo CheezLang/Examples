@@ -14,6 +14,7 @@ fs  :: import std.io.fs
 use import glfw
 use import vulkan
 use import vulkan_utils
+use import spirv_cross
 
 vk :: import vulkan_hl
 
@@ -35,7 +36,7 @@ glfw_error_callback :: (error: i32, description: ^mut char8) {
 vulkan_debug_callback :: (
     messageSeverity: VkDebugUtilsMessageSeverityFlagBitsEXT,
     messageType: VkDebugUtilsMessageTypeFlagsEXT,
-    pCallbackData: ^VkDebugUtilsMessengerCallbackDataEXT,
+    pCallbackData: ^mut VkDebugUtilsMessengerCallbackDataEXT,
     pUserData: ^mut void) -> VkBool32 #stdcall {
 
     if i32(messageSeverity) >= i32(VkDebugUtilsMessageSeverityFlagBitsEXT.WarningBitExt) {
@@ -54,30 +55,30 @@ vulkan_debug_callback :: (
 }
 
 Main :: () {
-    window := match create_window(800, 600) {
-        Ok($window) -> window
-        Err($err) -> {
-            io.formatln("GLFW error: {}", [err.slice()])
-            return
-        }
-    }
-
-    match app_main(window) {
-        Ok() -> {}
-
-        Err($err) -> {
-            io.formatln("Vulkan app failed with error {}", [&err])
-        }
-    }
-
-    // hello_triangle_app := HelloTriangleApplication.new()
-
-    // match hello_triangle_app.run() {
-    //     Ok(_) -> {}
-    //     Err($msg) -> {
-    //         io.formatln("[Vulkan Error] {}", [msg.slice()])
+    // window := match create_window(800, 600) {
+    //     Ok($window) -> window
+    //     Err($err) -> {
+    //         io.formatln("GLFW error: {}", [err.slice()])
+    //         return
     //     }
     // }
+
+    // match app_main(window) {
+    //     Ok() -> {}
+
+    //     Err($err) -> {
+    //         io.formatln("Vulkan app failed with error {}", [&err])
+    //     }
+    // }
+
+    hello_triangle_app := HelloTriangleApplication.new()
+
+    match hello_triangle_app.run() {
+        Ok(_) -> {}
+        Err($msg) -> {
+            io.formatln("[Vulkan Error] {}", [msg])
+        }
+    }
 }
 
 app_main :: (window: ^GLFWwindow) -> Result[(), vk.Error] {
@@ -144,12 +145,18 @@ VulkanContext :: struct {
     present_queue   : vk.Queue
 }
 
-impl Drop for VulkanContext {
-    drop :: (&Self) {
+impl VulkanContext {
+    destroy :: (&Self) {
         self.device.destroy()
         self.surface.destroy()
         self.debug_messenger.destroy()
         self.instance.destroy()
+    }
+}
+
+impl Drop for VulkanContext {
+    drop :: (&Self) {
+        self.destroy()
     }
 }
 
@@ -222,7 +229,6 @@ impl VulkanContext {
             extensions = device_extensions
             queues = queue_create_infos[..]
             features = &features))
-
         graphics_queue := device.get_queue(graphics_family)
         present_queue := device.get_queue(present_family)
 
@@ -268,13 +274,6 @@ HelloTriangleApplication :: struct {
 
     // vulkan stuff
     context                 : ^VulkanContext = null
-    instance                : VkInstance = null
-    debug_messenger         : VkDebugUtilsMessengerEXT = null
-    surface                 : VkSurfaceKHR = null
-    physical_device         : VkPhysicalDevice = null
-    device                  : VkDevice = null
-    graphics_queue          : VkQueue = null
-    present_queue           : VkQueue = null
     swapchain               : VkSwapchainKHR = null
     swapchain_images        := Array[VkImage].new()
     swapchain_image_views   := Array[VkImageView].new()
@@ -297,53 +296,49 @@ impl HelloTriangleApplication {
         return HelloTriangleApplication()
     }
 
-    run :: (&mut Self) -> Result[(), vk.Error] {
+    run :: (&mut Self) -> Result[(), String] {
         defer self.cleanup()
 
         // init stuff
-        // try(self.init_window())
-        // self.context = try(VulkanContext.new(self.window))
+        try(self.init_window())
+        try(self.init_vulkan())
 
-        // self.main_loop()
+        self.main_loop()
 
         return Ok()
     }
     
     cleanup_swapchain :: (&mut Self) {
         for(by_ref=false) framebuffer in self.swapchain_framebuffers.slice() {
-            if framebuffer  != null then vkDestroyFramebuffer(device, framebuffer, null)
+            if framebuffer  != null then vkDestroyFramebuffer(self.context.device.handle, framebuffer, null)
         }
 
-        vkFreeCommandBuffers(self.device, self.command_pool, cast self.command_buffers.count(), self.command_buffers.get_raw_mut())
+        vkFreeCommandBuffers(self.context.device.handle, self.command_pool, cast self.command_buffers.count(), self.command_buffers.get_raw_mut())
 
-        if graphics_pipeline!= null then vkDestroyPipeline(device, graphics_pipeline, null)
-        if pipeline_layout  != null then vkDestroyPipelineLayout(device, pipeline_layout, null)
-        if render_pass      != null then vkDestroyRenderPass(device, render_pass, null)
+        if graphics_pipeline!= null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
+        if pipeline_layout  != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
+        if render_pass      != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
         
         for(by_ref=false) view in self.swapchain_image_views.slice() {
-            if view         != null then vkDestroyImageView(device, view, null)
+            if view         != null then vkDestroyImageView(self.context.device.handle, view, null)
         }
 
-        if swapchain        != null then vkDestroySwapchainKHR(device, swapchain, null)
+        if swapchain        != null then vkDestroySwapchainKHR(self.context.device.handle, swapchain, null)
     }
 
     cleanup :: (&mut Self) {
-        // self.cleanup_swapchain()
+        self.cleanup_swapchain()
 
-        // for i in 0 .. MaxFramesInFlight {
-        //     if *sema_render_finished[i] != null then vkDestroySemaphore(device, *sema_render_finished[i], null)
-        //     if *sema_image_available[i] != null then vkDestroySemaphore(device, *sema_image_available[i], null)
-        //     if *fences_in_flight[i] != null then vkDestroyFence(device, *fences_in_flight[i], null)
-        // }
+        for i in 0 .. MaxFramesInFlight {
+            if *sema_render_finished[i] != null then vkDestroySemaphore(self.context.device.handle, *sema_render_finished[i], null)
+            if *sema_image_available[i] != null then vkDestroySemaphore(self.context.device.handle, *sema_image_available[i], null)
+            if *fences_in_flight[i] != null then vkDestroyFence(self.context.device.handle, *fences_in_flight[i], null)
+        }
 
-        // if command_pool     != null then vkDestroyCommandPool(device, command_pool, null)
+        if command_pool     != null then vkDestroyCommandPool(self.context.device.handle, command_pool, null)
 
-        // if device           != null then vkDestroyDevice(device, null)
-        // if surface          != null then vkDestroySurfaceKHR(instance, surface, null)
-        // if enable_validation_layers then Vulkan.vkDestroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null)
-        // if instance         != null then vkDestroyInstance(instance, null)
-
-        
+        self.context.destroy()
+        mem.free(self.context)
 
         // glfw
         if window           != null then glfwDestroyWindow(window)
@@ -359,14 +354,14 @@ impl HelloTriangleApplication {
             draw_frame()
         }
 
-        vkDeviceWaitIdle(self.device)
+        vkDeviceWaitIdle(self.context.device.handle)
     }
 
     draw_frame :: (&mut Self) {
-        vkWaitForFences(self.device, 1, ^*self.fences_in_flight[self.current_frame], VK_TRUE, u64.max)
+        vkWaitForFences(self.context.device.handle, 1, ^*self.fences_in_flight[self.current_frame], VK_TRUE, u64.max)
 
         image_index : u32 = default
-        match vkAcquireNextImageKHR(self.device, self.swapchain, u64.max, *self.sema_image_available[self.current_frame], null, ^image_index) {
+        match vkAcquireNextImageKHR(self.context.device.handle, self.swapchain, u64.max, *self.sema_image_available[self.current_frame], null, ^image_index) {
             .Success -> {}
             .SuboptimalKhr -> {}
 
@@ -383,7 +378,7 @@ impl HelloTriangleApplication {
 
         // check if a previous frame is using this image
         if *self.images_in_flight[i64(image_index)] != null {
-            vkWaitForFences(self.device, 1, ^*self.images_in_flight[i64(image_index)], VK_TRUE, u64.max)
+            vkWaitForFences(self.context.device.handle, 1, ^*self.images_in_flight[i64(image_index)], VK_TRUE, u64.max)
         }
 
         // mark the image as now being in use by this frame
@@ -403,8 +398,8 @@ impl HelloTriangleApplication {
             pSignalSemaphores    = signal_semaphores.data
         )
 
-        vkResetFences(self.device, 1, ^*self.fences_in_flight[self.current_frame])
-        vk_assert(vkQueueSubmit(self.graphics_queue, 1, ^submit_info, *self.fences_in_flight[self.current_frame]))
+        vkResetFences(self.context.device.handle, 1, ^*self.fences_in_flight[self.current_frame])
+        vk_assert(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^submit_info, *self.fences_in_flight[self.current_frame]))
 
         swapchains := [self.swapchain]
         present_info := VkPresentInfoKHR(
@@ -418,7 +413,7 @@ impl HelloTriangleApplication {
         )
 
         
-        match vkQueuePresentKHR(self.present_queue, ^present_info) {
+        match vkQueuePresentKHR(self.context.present_queue.handle, ^present_info) {
             .Success -> {}
             .SuboptimalKhr -> {}
 
@@ -494,11 +489,10 @@ impl HelloTriangleApplication {
     init_vulkan :: (&mut Self) -> Result[(), String] {
         // self.print_supported_extensions()
 
-        try(self.create_instance())
-        try(self.create_debug_messenger())
-        try(self.create_surface())
-        try(self.pick_physical_device())
-        try(self.create_logical_device())
+        self.context = try_with(VulkanContext.new(self.window), {
+            return Err(fmt.format("Vulkan Error: {}", [err]))
+        })
+
         try(self.create_swapchain())
         try(self.create_swapchain_image_views())
         try(self.create_render_pass())
@@ -522,7 +516,7 @@ impl HelloTriangleApplication {
             glfwWaitEvents()
         }
 
-        vkDeviceWaitIdle(self.device)
+        vkDeviceWaitIdle(self.context.device.handle)
 
         self.cleanup_swapchain()
 
@@ -536,121 +530,8 @@ impl HelloTriangleApplication {
         return Ok()
     }
 
-    print_supported_extensions :: (&Self) {
-        extensions := Vulkan.enumerate_instance_extension_properties()
-        for prop in &mut extensions {
-            io.formatln("Vulkan extension '{}', version: {}", [string.from_cstring(prop.extensionName.data), prop.specVersion])
-        }
-    }
-
     //////////////////////////////////////////
-    // stuff for creating instance
-    //////////////////////////////////////////
-
-    check_validation_layer_support :: (&mut Self) -> Result[(), String] {
-        supported_layers := Vulkan.enumerate_instance_layer_properties()
-
-        for layer in validation_layers[..] {
-            mut found := false
-            for prop in &mut supported_layers {
-                if string.from_cstring(layer) == string.from_cstring(prop.layerName.data) {
-                    found = true
-                    break
-                }
-            }
-            if !found {
-                return Err(fmt.format("Missing support for layer '{}'", [string.from_cstring(layer)]))
-            }
-        }
-
-        return Ok()
-    }
-
-    get_required_extensions :: (&mut Self) -> Array[^char8] {
-        mut glfw_extensions : []^char8 = default
-        glfw_extensions.data = glfwGetRequiredInstanceExtensions(cast ^mut glfw_extensions.length)
-
-        result := Array[^char8].new()
-        result.add_slice(glfw_extensions)
-        if enable_validation_layers {
-            result.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
-        }
-
-        return result
-    }
-
-    create_instance :: (&mut Self) -> Result[(), String] {
-        mut supported_instance_version : u32 = default
-        vkEnumerateInstanceVersion(^mut supported_instance_version)
-
-        io.formatln("supported instance version: {} {}", [supported_instance_version, VK_EXTRACT_VERSION(supported_instance_version)])
-
-        if enable_validation_layers {
-            try(self.check_validation_layer_support())
-        }
-
-        app_info := VkApplicationInfo(
-            sType              = .ApplicationInfo
-            pApplicationName   = "Hello Triangle"c
-            applicationVersion = VK_MAKE_VERSION(1, 0, 0)
-            pEngineName        = "No Engine"c
-            engineVersion      = VK_MAKE_VERSION(1, 0, 0)
-            apiVersion         = VK_MAKE_VERSION(1, 2, 0)
-        )
-
-        extensions := self.get_required_extensions()
-        debug_messenger_create_info := self.get_debug_messenger_create_info()
-
-        create_info := VkInstanceCreateInfo(
-            sType                   = .InstanceCreateInfo
-            pNext                   = if enable_validation_layers then cast(^void) ^debug_messenger_create_info else null
-            pApplicationInfo        = ^app_info
-            enabledLayerCount       = if enable_validation_layers then cast(u32) validation_layers.length else 0
-            ppEnabledLayerNames     = if enable_validation_layers then cast(^^char8) validation_layers.data else null
-            enabledExtensionCount   = cast extensions.count()
-            ppEnabledExtensionNames = extensions.get_raw()
-        )
-
-        vk_try(vkCreateInstance(^create_info, null, ^mut self.instance))
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating debug messenger
-    //////////////////////////////////////////
-
-    get_debug_messenger_create_info :: (&mut Self) -> VkDebugUtilsMessengerCreateInfoEXT {
-        return VkDebugUtilsMessengerCreateInfoEXT(
-            sType           = .DebugUtilsMessengerCreateInfoExt
-            messageSeverity = .VerboseBitExt or .InfoBitExt or .WarningBitExt or .ErrorBitExt
-            messageType     = .GeneralBitExt or .ValidationBitExt or .PerformanceBitExt
-            pfnUserCallback = vulkan_debug_callback
-            pUserData       = ^*self
-        )
-    }
-
-    create_debug_messenger :: (&mut Self) -> Result[(), String] {
-        if !enable_validation_layers {
-            return Ok()
-        }
-
-        create_info := self.get_debug_messenger_create_info()
-        vk_try(Vulkan.vkCreateDebugUtilsMessengerEXT(self.instance, ^create_info, null, ^self.debug_messenger))
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating surface
-    //////////////////////////////////////////
-
-    create_surface :: (&mut Self) -> Result[(), String] {
-        // vk_try(glfwCreateWindowSurface(self.instance, self.window, null, ^mut self.surface))
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for physical device
+    // stuff for creating swapchain
     //////////////////////////////////////////
 
     find_queue_families :: (&mut Self, physical_device: VkPhysicalDevice) -> QueueFamilyIndices {
@@ -665,7 +546,7 @@ impl HelloTriangleApplication {
 
             // check presentation support
             mut present_support : VkBool32 = 0
-            vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, cast i, self.surface, ^mut present_support)
+            vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, cast i, self.context.surface.handle, ^mut present_support)
             if present_support != 0 {
                 indices.present_family = Some(u32(i))
             }
@@ -677,136 +558,14 @@ impl HelloTriangleApplication {
 
         return indices
     }
-
-    check_device_extension_support :: (&mut Self, physical_device: VkPhysicalDevice) -> bool {
-        supported_extensions := Vulkan.enumerate_device_extension_properties(physical_device)
-
-        for layer in device_extensions[..] {
-            mut found := false
-            for prop in &mut supported_extensions {
-                if string.from_cstring(layer) == string.from_cstring(prop.extensionName.data) {
-                    found = true
-                    break
-                }
-            }
-            if !found {
-                return false
-            }
-        }
-
-        return true
-    }
-
-    is_physical_device_suitable :: (&mut Self, physical_device: VkPhysicalDevice) -> bool {
-        mut properties := VkPhysicalDeviceProperties()
-        mut features := VkPhysicalDeviceFeatures()
-        vkGetPhysicalDeviceProperties(physical_device, ^mut properties)
-        vkGetPhysicalDeviceFeatures(physical_device, ^mut features)
-
-        indices := self.find_queue_families(physical_device)
-        if !indices.is_complete() {
-            return false
-        }
-
-        if !self.check_device_extension_support(physical_device) {
-            return false
-        }
-
-        swapchain_support := self.query_swapchain_support(physical_device)
-        if swapchain_support.formats.count() == 0 or swapchain_support.present_modes.count() == 0 {
-            return false
-        }
-
-        return true
-    }
-
-    pick_physical_device :: (&mut Self) -> Result[(), String] {
-        physical_devices := try_with(Vulkan.enumerate_physical_devices(self.instance), { return Err(err) })
-        io.formatln("[Vulkan] {} physical devices found", [physical_devices.count()])
-
-        // pick first physical device thats suitable
-        for(by_ref=false) device in &mut physical_devices {
-            if self.is_physical_device_suitable(device) {
-                self.physical_device = device
-
-                mut properties := VkPhysicalDeviceProperties()
-                mut features := VkPhysicalDeviceFeatures()
-                vkGetPhysicalDeviceProperties(device, ^mut properties)
-                vkGetPhysicalDeviceFeatures(device, ^mut features)
-
-                io.formatln("[Vulkan] Picked physical device: {}", [string.from_cstring(properties.deviceName.data)])
-                io.formatln("[Vulkan]     api version   : {} {}", [properties.apiVersion, VK_EXTRACT_VERSION(properties.apiVersion)])
-                io.formatln("[Vulkan]     driver version: {} {}", [properties.driverVersion, VK_EXTRACT_VERSION(properties.driverVersion)])
-                io.formatln("[Vulkan]     device type   : {}", [properties.deviceType])
-                // io.formatln("[Vulkan]     limits        : {:?}", [properties.limits])
-                // io.formatln("[Vulkan]     features      : {:?}", [features])
-
-                return Ok()
-            }
-        }
-
-        return Err("No suitable physical device found".to_owned())
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating logical device
-    //////////////////////////////////////////
-
-    create_logical_device :: (&mut Self) -> Result[(), String] {
-        indices := self.find_queue_families(self.physical_device)
-
-        queue_create_infos := Array[VkDeviceQueueCreateInfo].new()
-
-        unique_queue_families := Map[u32, ()].new()
-        unique_queue_families.set(indices.graphics_family.unwrap(), ())
-        unique_queue_families.set(indices.present_family.unwrap(), ())
-
-        queue_priority := 1.0f
-        for kv in &unique_queue_families {
-            index, _ := kv
-            queue_create_infos.add(VkDeviceQueueCreateInfo(
-                sType               = .DeviceQueueCreateInfo
-                queueFamilyIndex    = *index
-                queueCount          = 1
-                pQueuePriorities    = ^queue_priority
-            ))
-        }
-
-        device_features := VkPhysicalDeviceFeatures()
-        
-        create_info := VkDeviceCreateInfo(
-            sType                   = .DeviceCreateInfo
-            queueCreateInfoCount    = cast queue_create_infos.count()
-            pQueueCreateInfos       = queue_create_infos.get_raw()
-
-            // this should not be required for vulkan 1.1 and later
-            enabledLayerCount       = if enable_validation_layers then cast(u32) validation_layers.length else 0
-            ppEnabledLayerNames     = if enable_validation_layers then cast(^^char8) validation_layers.data else null
-
-            enabledExtensionCount   = cast(u32) device_extensions.length
-            ppEnabledExtensionNames = cast(^^char8) device_extensions.data
-            pEnabledFeatures        = ^device_features
-        )
-
-        vk_try(vkCreateDevice(self.physical_device, ^create_info, null, ^mut self.device))
-
-        vkGetDeviceQueue(self.device, indices.graphics_family.unwrap(), 0, ^mut self.graphics_queue)
-        vkGetDeviceQueue(self.device, indices.present_family.unwrap(), 0, ^mut self.present_queue)
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating swapchain
-    //////////////////////////////////////////
-
+    
     query_swapchain_support :: (&mut Self, physical_device: VkPhysicalDevice) -> SwapChainSupportDetails {
         mut details := SwapChainSupportDetails(
-            formats         = Vulkan.get_physical_device_surface_formats(physical_device, self.surface)
-            present_modes   = Vulkan.get_physical_device_surface_present_modes(physical_device, self.surface)
+            formats         = Vulkan.get_physical_device_surface_formats(physical_device, self.context.surface.handle)
+            present_modes   = Vulkan.get_physical_device_surface_present_modes(physical_device, self.context.surface.handle)
         )
 
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, self.surface, ^mut details.capabilities)
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, self.context.surface.handle, ^mut details.capabilities)
 
         return details
     }
@@ -847,7 +606,7 @@ impl HelloTriangleApplication {
     }
 
     create_swapchain :: (&mut Self) -> Result[(), String] {
-        mut swapchain_support := self.query_swapchain_support(self.physical_device)
+        mut swapchain_support := self.query_swapchain_support(self.context.physical_device.handle)
 
         surface_format := choose_swap_surface_format(&mut swapchain_support.formats)
         present_mode := choose_swap_present_mode(&mut swapchain_support.present_modes)
@@ -857,14 +616,14 @@ impl HelloTriangleApplication {
             image_count = swapchain_support.capabilities.maxImageCount
         }
 
-        // io.formatln("[Vulkan] swapchain surface format  : {}", [surface_format])
-        // io.formatln("[Vulkan] swapchain present mode    : {}", [present_mode])
-        // io.formatln("[Vulkan] swapchain extent          : {}", [extent])
-        // io.formatln("[Vulkan] swapchain image count     : {}", [image_count])
+        io.formatln("[Vulkan] swapchain surface format  : {}", [surface_format])
+        io.formatln("[Vulkan] swapchain present mode    : {}", [present_mode])
+        io.formatln("[Vulkan] swapchain extent          : {}", [extent])
+        io.formatln("[Vulkan] swapchain image count     : {}", [image_count])
 
         mut create_info := VkSwapchainCreateInfoKHR(
             sType                   = .SwapchainCreateInfoKhr
-            surface                 = self.surface
+            surface                 = self.context.surface.handle
             minImageCount           = image_count
             imageFormat             = surface_format.format
             imageColorSpace         = surface_format.colorSpace
@@ -878,7 +637,7 @@ impl HelloTriangleApplication {
             oldSwapchain            = null
         )
 
-        indices := self.find_queue_families(self.physical_device)
+        indices := self.find_queue_families(self.context.physical_device.handle)
         queue_family_indices := [indices.graphics_family.unwrap(), indices.present_family.unwrap()]
         if indices.graphics_family.unwrap() != indices.present_family.unwrap() {
             create_info.imageSharingMode = .Concurrent
@@ -890,12 +649,12 @@ impl HelloTriangleApplication {
             create_info.pQueueFamilyIndices = null
         }
 
-        vk_try(vkCreateSwapchainKHR(self.device, ^create_info, null, ^mut self.swapchain))
+        vk_try(vkCreateSwapchainKHR(self.context.device.handle, ^create_info, null, ^mut self.swapchain))
 
         // get handles to images in swapchain
-        vkGetSwapchainImagesKHR(self.device, self.swapchain, ^mut image_count, null)
+        vkGetSwapchainImagesKHR(self.context.device.handle, self.swapchain, ^mut image_count, null)
         self.swapchain_images.resize(cast image_count)
-        vkGetSwapchainImagesKHR(self.device, self.swapchain, ^mut image_count, self.swapchain_images.get_raw_mut())
+        vkGetSwapchainImagesKHR(self.context.device.handle, self.swapchain, ^mut image_count, self.swapchain_images.get_raw_mut())
 
         self.swapchain_image_format = surface_format.format
         self.swapchain_extent = extent
@@ -931,7 +690,7 @@ impl HelloTriangleApplication {
                 )
             )
 
-            vk_try(vkCreateImageView(self.device, ^create_info, null, ^mut *self.swapchain_image_views[i]))
+            vk_try(vkCreateImageView(self.context.device.handle, ^create_info, null, ^mut *self.swapchain_image_views[i]))
         }
 
         return Ok()
@@ -989,7 +748,7 @@ impl HelloTriangleApplication {
             pDependencies   = ^dependency
         )
 
-        vk_try(vkCreateRenderPass(self.device, ^render_pass_info, null, ^mut self.render_pass))
+        vk_try(vkCreateRenderPass(self.context.device.handle, ^render_pass_info, null, ^mut self.render_pass))
 
         return Ok()
     }
@@ -1002,11 +761,11 @@ impl HelloTriangleApplication {
         create_info := VkShaderModuleCreateInfo(
             sType    = .ShaderModuleCreateInfo
             codeSize = cast code.length
-            pCode    = cast(^u32) code.data
+            pCode    = cast(^mut u32) code.data
         )
 
         mut shader_module : VkShaderModule = default
-        vk_try(vkCreateShaderModule(self.device, ^create_info, null, ^mut shader_module))
+        vk_try(vkCreateShaderModule(self.context.device.handle, ^create_info, null, ^mut shader_module))
 
         return Ok(shader_module)
     }
@@ -1016,10 +775,10 @@ impl HelloTriangleApplication {
         frag_shader_code := try_with(fs.read_file_binary("bin/triangle_fragment.spv"), { return Err(fmt.format("Failed to load fragment shader: {}", [err])) })
 
         vert_shader_module := try(self.create_shader_module(vert_shader_code.slice()))
-        defer vkDestroyShaderModule(self.device, vert_shader_module, null)
+        defer vkDestroyShaderModule(self.context.device.handle, vert_shader_module, null)
 
         frag_shader_module := try(self.create_shader_module(frag_shader_code.slice()))
-        defer vkDestroyShaderModule(self.device, frag_shader_module, null)
+        defer vkDestroyShaderModule(self.context.device.handle, frag_shader_module, null)
 
         vert_shader_stage_info := VkPipelineShaderStageCreateInfo(
             sType               = .PipelineShaderStageCreateInfo
@@ -1105,7 +864,7 @@ impl HelloTriangleApplication {
             srcAlphaBlendFactor = .One
             dstAlphaBlendFactor = .Zero
             alphaBlendOp        = .Add
-            colorWriteMask      = .R or .G or .B or .A
+            colorWriteMask      = .RBit or .GBit or .BBit or .ABit
         )
 
         color_blending := VkPipelineColorBlendStateCreateInfo(
@@ -1125,7 +884,7 @@ impl HelloTriangleApplication {
             pPushConstantRanges    = null
         )
 
-        vk_try(vkCreatePipelineLayout(self.device, ^pipline_layout_info, null, ^mut self.pipeline_layout))
+        vk_try(vkCreatePipelineLayout(self.context.device.handle, ^pipline_layout_info, null, ^mut self.pipeline_layout))
 
         pipeline_info := VkGraphicsPipelineCreateInfo(
             sType               = .GraphicsPipelineCreateInfo
@@ -1147,7 +906,7 @@ impl HelloTriangleApplication {
             basePipelineIndex   = -1
         )
 
-        vk_try(vkCreateGraphicsPipelines(self.device, null, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
+        vk_try(vkCreateGraphicsPipelines(self.context.device.handle, null, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
 
         return Ok()
     }
@@ -1171,7 +930,7 @@ impl HelloTriangleApplication {
                 layers          = 1
             )
 
-            vk_try(vkCreateFramebuffer(self.device, ^framebuffer_info, null, ^mut *self.swapchain_framebuffers[i]))
+            vk_try(vkCreateFramebuffer(self.context.device.handle, ^framebuffer_info, null, ^mut *self.swapchain_framebuffers[i]))
         }
 
         return Ok()
@@ -1182,14 +941,14 @@ impl HelloTriangleApplication {
     //////////////////////////////////////////
 
     create_command_pool :: (&mut Self) -> Result[(), String] {
-        queue_family_indices := find_queue_families(self.physical_device)
+        queue_family_indices := find_queue_families(self.context.physical_device.handle)
 
         pool_info := VkCommandPoolCreateInfo(
             sType            = .CommandPoolCreateInfo
             queueFamilyIndex = queue_family_indices.graphics_family.unwrap()
         )
 
-        vk_try(vkCreateCommandPool(self.device, ^pool_info, null, ^mut self.command_pool))
+        vk_try(vkCreateCommandPool(self.context.device.handle, ^pool_info, null, ^mut self.command_pool))
 
         return Ok()
     }
@@ -1208,7 +967,7 @@ impl HelloTriangleApplication {
             commandBufferCount = cast self.command_buffers.count()
         )
 
-        vk_try(vkAllocateCommandBuffers(self.device, ^alloc_info, self.command_buffers.get_raw_mut()))
+        vk_try(vkAllocateCommandBuffers(self.context.device.handle, ^alloc_info, self.command_buffers.get_raw_mut()))
 
         for(by_ref=false) framebuffer, i in self.swapchain_framebuffers.slice() {
             begin_info := VkCommandBufferBeginInfo(
@@ -1261,9 +1020,9 @@ impl HelloTriangleApplication {
         )
 
         for i in 0 .. MaxFramesInFlight {
-            vk_try(vkCreateSemaphore(self.device, ^semaphore_info, null, ^mut *self.sema_image_available[i]))
-            vk_try(vkCreateSemaphore(self.device, ^semaphore_info, null, ^mut *self.sema_render_finished[i]))
-            vk_try(vkCreateFence(self.device, ^fence_info, null, ^mut *self.fences_in_flight[i]))
+            vk_try(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut *self.sema_image_available[i]))
+            vk_try(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut *self.sema_render_finished[i]))
+            vk_try(vkCreateFence(self.context.device.handle, ^fence_info, null, ^mut *self.fences_in_flight[i]))
         }
 
         return Ok()
