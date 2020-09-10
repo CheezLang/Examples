@@ -279,6 +279,8 @@ HelloTriangleApplication :: struct {
 
     // vulkan stuff
     context                 : ^VulkanContext = null
+    surface_capabilities    := Option[vk.PhysicalDeviceSurfaceCapabilities].None
+    swapchain_format        : VkSurfaceFormatKHR = default
     swapchain               := Rc[vk.Swapchain].empty()
     render_pass             : VkRenderPass = null
     pipeline_layout         : VkPipelineLayout = null
@@ -317,18 +319,17 @@ impl HelloTriangleApplication {
 
         if graphics_pipeline!= null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
         if pipeline_layout  != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
-        if render_pass      != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
         
         for(by_ref=false) view in self.swapchain.get().get_image_views() {
             if view         != null then vkDestroyImageView(self.context.device.handle, view, null)
         }
 
         swapchain.get().destroy()
-        // if swapchain        != null then vkDestroySwapchainKHR(self.context.device.handle, swapchain, null)
     }
 
     cleanup :: (&mut Self) {
         self.cleanup_swapchain()
+        if render_pass != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
 
         for i in 0 .. MaxFramesInFlight {
             if *sema_render_finished[i] != null then vkDestroySemaphore(self.context.device.handle, *sema_render_finished[i], null)
@@ -479,12 +480,6 @@ impl HelloTriangleApplication {
     }
 }
 
-SwapChainSupportDetails :: struct {
-    capabilities    : VkSurfaceCapabilitiesKHR = default
-    formats         := Array[VkSurfaceFormatKHR].new()
-    present_modes   := Array[VkPresentModeKHR].new()
-}
-
 // vulkan stuff
 impl HelloTriangleApplication {
     init_vulkan :: (&mut Self) -> Result[(), String] {
@@ -493,6 +488,8 @@ impl HelloTriangleApplication {
         self.context = try_with(VulkanContext.new(self.window), {
             return Err(fmt.format("Failed to create context: {}", [err]))
         })
+        self.surface_capabilities = Some(self.context.physical_device.query_swapchain_support(&self.context.surface))
+        self.swapchain_format = self.surface_capabilities.unwrap_ref().choose_swap_surface_format(.R8g8b8a8Srgb, .SrgbNonlinearKhr)
 
         try(self.create_command_pool())
         try(self.create_swapchain())
@@ -505,11 +502,10 @@ impl HelloTriangleApplication {
     recreate_swapchains :: (&mut Self) -> Result[(), String] {
         self.framebuffer_resized = false
 
-        
-        mut width, height : (i32, i32) = default
-        glfwGetFramebufferSize(self.window, ^mut width, ^mut height)
-        while width == 0 or height == 0 {
-            glfwGetFramebufferSize(self.window, ^mut width, ^mut height)
+        mut window_extent := VkExtent2D()
+        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
+        while window_extent.width == 0 or window_extent.height == 0 {
+            glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
             glfwWaitEvents()
         }
 
@@ -517,18 +513,50 @@ impl HelloTriangleApplication {
 
         self.cleanup_swapchain()
 
-        try(self.create_swapchain())
+        self.surface_capabilities.unwrap_ref_mut().update_capabilities(&self.context.surface)
+
+        // create new swapchain
+        self.swapchain = try_with(vk.Swapchain.new(
+            device                  = &self.context.device
+            physical_device         = &self.context.physical_device
+            surface                 = &self.context.surface
+            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
+            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
+            image_format            = self.swapchain_format.format
+            color_space             = self.swapchain_format.colorSpace
+            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
+            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
+            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
+        ), {
+            return Err(fmt.format("Failed to create swapchain: {}", [err]))
+        })
+        try_with(self.swapchain.get_mut().create_image_views(), {
+            return Err(fmt.format("Failed to create swapchain image views: {}", [err]))
+        })
+        try(self.create_graphics_pipeline())
+        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), {
+            return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err]))
+        })
+        try(self.create_command_buffers())
 
         return Ok()
     }
 
     create_swapchain :: (&mut Self) -> Result[(), String] {
+        mut window_extent := VkExtent2D()
+        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
+
         self.swapchain = try_with(vk.Swapchain.new(
-            device          = &self.context.device
-            physical_device = &self.context.physical_device
-            surface         = &self.context.surface
-            fallback_extent = VkExtent2D()
-            queue_family_indices = [self.context.graphics_queue_family, self.context.present_queue_family]
+            device                  = &self.context.device
+            physical_device         = &self.context.physical_device
+            surface                 = &self.context.surface
+            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
+            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
+            image_format            = self.swapchain_format.format
+            color_space             = self.swapchain_format.colorSpace
+            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
+            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
+            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
         ), {
             return Err(fmt.format("Failed to create swapchain: {}", [err]))
         })
