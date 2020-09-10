@@ -317,9 +317,6 @@ impl HelloTriangleApplication {
 
         vkFreeCommandBuffers(self.context.device.handle, self.command_pool, cast self.command_buffers.count(), self.command_buffers.get_raw_mut())
 
-        if graphics_pipeline!= null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
-        if pipeline_layout  != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
-        
         for(by_ref=false) view in self.swapchain.get().get_image_views() {
             if view         != null then vkDestroyImageView(self.context.device.handle, view, null)
         }
@@ -328,6 +325,9 @@ impl HelloTriangleApplication {
     }
 
     cleanup :: (&mut Self) {
+        if graphics_pipeline!= null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
+        if pipeline_layout  != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
+        
         self.cleanup_swapchain()
         if render_pass != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
 
@@ -483,18 +483,35 @@ impl HelloTriangleApplication {
 // vulkan stuff
 impl HelloTriangleApplication {
     init_vulkan :: (&mut Self) -> Result[(), String] {
-        // self.print_supported_extensions()
-
-        self.context = try_with(VulkanContext.new(self.window), {
-            return Err(fmt.format("Failed to create context: {}", [err]))
-        })
+        self.context = try_with(VulkanContext.new(self.window), { return Err(fmt.format("Failed to create context: {}", [err])) })
         self.surface_capabilities = Some(self.context.physical_device.query_swapchain_support(&self.context.surface))
         self.swapchain_format = self.surface_capabilities.unwrap_ref().choose_swap_surface_format(.R8g8b8a8Srgb, .SrgbNonlinearKhr)
 
         try(self.create_command_pool())
-        try(self.create_swapchain())
-        try(self.create_sync_objects())
+        
+        mut window_extent := VkExtent2D()
+        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
 
+        self.swapchain = try_with(vk.Swapchain.new(
+            device                  = &self.context.device
+            physical_device         = &self.context.physical_device
+            surface                 = &self.context.surface
+            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
+            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
+            image_format            = self.swapchain_format.format
+            color_space             = self.swapchain_format.colorSpace
+            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
+            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
+            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
+        ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
+
+        try(self.create_render_pass())
+        try(self.create_graphics_pipeline())
+
+        try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
+        try(self.create_command_buffers())
+        try(self.create_sync_objects())
 
         return Ok()
     }
@@ -510,9 +527,7 @@ impl HelloTriangleApplication {
         }
 
         vkDeviceWaitIdle(self.context.device.handle)
-
         self.cleanup_swapchain()
-
         self.surface_capabilities.unwrap_ref_mut().update_capabilities(&self.context.surface)
 
         // create new swapchain
@@ -527,48 +542,11 @@ impl HelloTriangleApplication {
             present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
             image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
             pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
-        ), {
-            return Err(fmt.format("Failed to create swapchain: {}", [err]))
-        })
-        try_with(self.swapchain.get_mut().create_image_views(), {
-            return Err(fmt.format("Failed to create swapchain image views: {}", [err]))
-        })
-        try(self.create_graphics_pipeline())
-        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), {
-            return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err]))
-        })
+        ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
         try(self.create_command_buffers())
 
-        return Ok()
-    }
-
-    create_swapchain :: (&mut Self) -> Result[(), String] {
-        mut window_extent := VkExtent2D()
-        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
-
-        self.swapchain = try_with(vk.Swapchain.new(
-            device                  = &self.context.device
-            physical_device         = &self.context.physical_device
-            surface                 = &self.context.surface
-            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
-            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
-            image_format            = self.swapchain_format.format
-            color_space             = self.swapchain_format.colorSpace
-            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
-            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
-            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
-        ), {
-            return Err(fmt.format("Failed to create swapchain: {}", [err]))
-        })
-        try_with(self.swapchain.get_mut().create_image_views(), {
-            return Err(fmt.format("Failed to create swapchain image views: {}", [err]))
-        })
-        try(self.create_render_pass())
-        try(self.create_graphics_pipeline())
-        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), {
-            return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err]))
-        })
-        try(self.create_command_buffers())
         return Ok()
     }
 
@@ -686,26 +664,12 @@ impl HelloTriangleApplication {
             primitiveRestartEnable = VK_FALSE
         )
 
-        viewport := VkViewport(
-            x        = 0.0
-            y        = 0.0
-            width    = cast(float) self.swapchain.get().extent.width
-            height   = cast(float) self.swapchain.get().extent.height
-            minDepth = 0.0
-            maxDepth = 1.0
-        )
-
-        scissor := VkRect2D(
-            offset = VkOffset2D(0, 0)
-            extent = self.swapchain.get().extent
-        )
-
         viewport_state := VkPipelineViewportStateCreateInfo(
             sType         = .PipelineViewportStateCreateInfo
             viewportCount = 1
-            pViewports    = ^viewport
+            pViewports    = null
             scissorCount  = 1
-            pScissors     = ^scissor
+            pScissors     = null
         )
 
         rasterizer := VkPipelineRasterizationStateCreateInfo(
@@ -762,6 +726,13 @@ impl HelloTriangleApplication {
 
         vk_try(vkCreatePipelineLayout(self.context.device.handle, ^pipline_layout_info, null, ^mut self.pipeline_layout))
 
+        mut dynamic_states : []VkDynamicState = [ VkDynamicState.Scissor, VkDynamicState.Viewport ]
+        dynamic_state := VkPipelineDynamicStateCreateInfo(
+            sType               = .PipelineDynamicStateCreateInfo
+            dynamicStateCount   = cast dynamic_states.length
+            pDynamicStates      = cast(^mut VkDynamicState) dynamic_states.data
+        )
+
         pipeline_info := VkGraphicsPipelineCreateInfo(
             sType               = .GraphicsPipelineCreateInfo
             stageCount          = 2
@@ -774,7 +745,7 @@ impl HelloTriangleApplication {
             pMultisampleState   = ^multisampling
             pDepthStencilState  = null
             pColorBlendState    = ^color_blending
-            pDynamicState       = null
+            pDynamicState       = ^dynamic_state
             layout              = self.pipeline_layout
             renderPass          = self.render_pass
             subpass             = 0
@@ -840,6 +811,24 @@ impl HelloTriangleApplication {
             )
             vkCmdBeginRenderPass(*command_buffers[i], ^render_pass_info, .Inline)
             vkCmdBindPipeline(*command_buffers[i], .Graphics, self.graphics_pipeline)
+            
+            viewport := VkViewport(
+                x        = 0.0
+                y        = 0.0
+                width    = cast(float) self.swapchain.get().extent.width
+                height   = cast(float) self.swapchain.get().extent.height
+                minDepth = 0.0
+                maxDepth = 1.0
+            )
+
+            scissor := VkRect2D(
+                offset = VkOffset2D(0, 0)
+                extent = self.swapchain.get().extent
+            )
+
+            vkCmdSetViewport(*command_buffers[i], 0, 1, ^viewport)
+            vkCmdSetScissor(*command_buffers[i], 0, 1, ^scissor)
+
             vkCmdDraw(*command_buffers[i], 3, 1, 0, 0)
             vkCmdEndRenderPass(*command_buffers[i])
             vk_try(vkEndCommandBuffer(*command_buffers[i]))
