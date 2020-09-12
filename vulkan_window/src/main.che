@@ -200,6 +200,14 @@ FrameData :: struct {
     query_results   : [2]u64 = default
 }
 
+FrameStatistics :: struct {
+    avg_speed   := 0.02
+    total_time  := 0.0
+    cpu_time    := 0.0
+    wait_time   := 0.0
+    gpu_time    := 0.0
+}
+
 HelloTriangleApplication :: struct {
     // window stuff
     window                  : ^mut GLFWwindow = null
@@ -227,6 +235,8 @@ HelloTriangleApplication :: struct {
     sema_render_finished    := Array[VkSemaphore].new()
     fences_in_flight        := Array[VkFence].new()
     images_in_flight        := Array[VkFence].new()
+
+    frame_statistics        := FrameStatistics()
 
     // query_result_buffer     : VkBuffer = null
     // query_result_buffer_mem : VkDeviceMemory = null
@@ -377,36 +387,29 @@ impl HelloTriangleApplication {
         glfwShowWindow(window)
         mut window_title := String.empty()
 
-        avg_speed := 0.05
-        mut cpu_time_avg := 0.0
-        mut gpu_time_avg := 0.0
-
         while glfwWindowShouldClose(window) == 0 {
-            glfwPollEvents()
             cpu_start := glfwGetTime()
+            glfwPollEvents()
             draw_frame()
             cpu_end := glfwGetTime()
 
             { // calculate timing and set title
-                cpu_time := (cpu_end - cpu_start) * 1000.0
-                cpu_time_avg = avg_speed * cpu_time + (1 - avg_speed) * cpu_time_avg
-
+                frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
                 timestamp_period := f64(self.context.physical_device.properties.limits.timestampPeriod)
 
-                frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
-
-                gpu_time_start := f64(*frame.query_results[0]) * timestamp_period * 0.000001
-                gpu_time_end := f64(*frame.query_results[1]) * timestamp_period * 0.000001
-                gpu_time := gpu_time_end - gpu_time_start
-                gpu_time_avg = avg_speed * gpu_time + (1 - avg_speed) * gpu_time_avg
+                self.frame_statistics.cpu_time = self.frame_statistics.avg_speed * (cpu_end - cpu_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.cpu_time
+                self.frame_statistics.gpu_time = self.frame_statistics.avg_speed * f64(*frame.query_results[1] - *frame.query_results[0]) * timestamp_period * 0.000001 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.gpu_time
 
                 mut fps := 0.0
-                if cpu_time_avg != 0 {
-                    fps = 1000.0 / cpu_time_avg
+                if self.frame_statistics.cpu_time != 0 {
+                    fps = 1000.0 / self.frame_statistics.cpu_time
                 }
 
                 window_title.clear()
-                fmt.format_into(&mut window_title, "Vulkan Test - CPU: {:.2}ms ({:.1} fps), GPU: {:.2}ms", [cpu_time_avg, fps, gpu_time_avg])
+                fmt.format_into(&mut window_title, "Vulkan Test - CPU: {:.2}ms, wait: {:.2}ms ({:.1} fps), GPU: {:.2}ms", [
+                    self.frame_statistics.cpu_time, self.frame_statistics.wait_time, fps
+                    self.frame_statistics.gpu_time
+                ])
                 glfwSetWindowTitle(self.window, cast window_title.as_cstring())
             }
         }
@@ -436,8 +439,10 @@ impl HelloTriangleApplication {
         }
 
         // wait for previous frame to be finished
+        wait_start := glfwGetTime()
         vk_assert(vkWaitForFences(self.context.device.handle, 1, ^frame.fence_draw_done, VK_TRUE, u64.max))
-
+        wait_end := glfwGetTime()
+        self.frame_statistics.wait_time = self.frame_statistics.avg_speed * (wait_end - wait_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.wait_time
         vkGetQueryPoolResults(self.context.device.handle, frame.query_pool, 0, cast frame.query_results.length, @sizeof(@typeof(frame.query_results)), cast frame.query_results.data, @sizeof(u64), ._64Bit)
 
         // render frame
@@ -729,8 +734,8 @@ impl HelloTriangleApplication {
     }
 
     create_graphics_pipeline :: (&mut Self) -> Result[(), String] {
-        vert_shader_code := try_with(fs.read_file_binary("bin/triangle_vertex.spv"), { return Err(fmt.format("Failed to load vertex shader: {}", [err])) })
-        frag_shader_code := try_with(fs.read_file_binary("bin/triangle_fragment.spv"), { return Err(fmt.format("Failed to load fragment shader: {}", [err])) })
+        vert_shader_code := try_with(fs.read_file_binary("triangle.vert.spv"), { return Err(fmt.format("Failed to load vertex shader: {}", [err])) })
+        frag_shader_code := try_with(fs.read_file_binary("triangle.frag.spv"), { return Err(fmt.format("Failed to load fragment shader: {}", [err])) })
 
         vert_shader_module := try(self.create_shader_module(vert_shader_code.slice()))
         defer vkDestroyShaderModule(self.context.device.handle, vert_shader_module, null)
