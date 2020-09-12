@@ -18,6 +18,10 @@ use import vulkan
 use import vulkan_utils
 use import spirv_cross
 
+imgui :: import imgui
+use import imgui_glfw
+use import imgui_vulkan
+
 vk :: import vulkan_hl
 
 MaxFramesInFlight :: 2
@@ -226,16 +230,11 @@ HelloTriangleApplication :: struct {
     render_pass             : VkRenderPass = null
     pipeline_layout         : VkPipelineLayout = null
     graphics_pipeline       : VkPipeline = null
-
+    pipeline_cache          : VkPipelineCache = null
+    descriptor_pool         : VkDescriptorPool = null
     command_pool            : VkCommandPool = null
 
     frames                  := Array[FrameData].new()
-    command_buffers         := Array[VkCommandBuffer].new()
-    sema_image_available    := Array[VkSemaphore].new()
-    sema_render_finished    := Array[VkSemaphore].new()
-    fences_in_flight        := Array[VkFence].new()
-    images_in_flight        := Array[VkFence].new()
-
     frame_statistics        := FrameStatistics()
 
     // query_result_buffer     : VkBuffer = null
@@ -331,6 +330,9 @@ impl HelloTriangleApplication {
             self.frames.add(frame)
         }
 
+        // imgui setup
+        try(self.init_imgui(window))
+
         // (self.query_result_buffer, self.query_result_buffer_mem) = try(self.create_buffer(100 * @sizeof(u64)))
         // vk_try(vkMapMemory(self.context.device.handle, self.query_result_buffer_mem, 0, 100 * @sizeof(u64), .None, cast ^mut self.query_result_buffer_ptr.data))
         // self.query_result_buffer_ptr.length = 100
@@ -345,8 +347,6 @@ impl HelloTriangleApplication {
             if framebuffer != null then vkDestroyFramebuffer(self.context.device.handle, framebuffer, null)
         }
 
-        vkFreeCommandBuffers(self.context.device.handle, self.command_pool, cast self.command_buffers.count(), self.command_buffers.get_raw_mut())
-
         for(by_ref=false) view in self.swapchain.get().get_image_views() {
             if view != null then vkDestroyImageView(self.context.device.handle, view, null)
         }
@@ -355,6 +355,12 @@ impl HelloTriangleApplication {
     }
 
     cleanup :: (&mut Self) {
+        // imgui
+        ImGui_ImplVulkan_Shutdown()
+        ImGui_ImplGlfw_Shutdown()
+        imgui.DestroyContext(null)
+
+
         for(by_ref=true) frame in self.frames[..] {
             vkDestroyFence(self.context.device.handle, frame.fence_draw_done, null)
             vkDestroySemaphore(self.context.device.handle, frame.sema_acquire, null)
@@ -362,17 +368,14 @@ impl HelloTriangleApplication {
             vkDestroyQueryPool(self.context.device.handle, frame.query_pool, null)
         }
 
+        if descriptor_pool != null then vkDestroyDescriptorPool(self.context.device.handle, descriptor_pool, null)
+        if pipeline_cache != null then vkDestroyPipelineCache(self.context.device.handle, pipeline_cache, null)
+
         if graphics_pipeline != null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
         if pipeline_layout   != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
 
         self.cleanup_swapchain()
         if render_pass != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
-        for i in 0 .. MaxFramesInFlight {
-            if *sema_render_finished[i] != null then vkDestroySemaphore(self.context.device.handle, *sema_render_finished[i], null)
-            if *sema_image_available[i] != null then vkDestroySemaphore(self.context.device.handle, *sema_image_available[i], null)
-            if *fences_in_flight[i] != null then vkDestroyFence(self.context.device.handle, *fences_in_flight[i], null)
-        }
-
         if command_pool != null then vkDestroyCommandPool(self.context.device.handle, command_pool, null)
 
         self.context.destroy()
@@ -418,6 +421,16 @@ impl HelloTriangleApplication {
     }
 
     draw_frame :: (&mut Self) {
+        ImGui_ImplVulkan_NewFrame()
+        ImGui_ImplGlfw_NewFrame()
+        imgui.NewFrame()
+        {
+            show_demo_window := true
+            if show_demo_window then
+                imgui.ShowDemoWindow(^show_demo_window)
+        }
+        imgui.Render()
+
         defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
         frame : &mut FrameData = self.frames[self.current_frame]
 
@@ -456,9 +469,6 @@ impl HelloTriangleApplication {
 
             vk_assert(vkBeginCommandBuffer(frame.command_buffer, ^begin_info))
 
-            vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
-            vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
-
             clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
             render_pass_info := VkRenderPassBeginInfo(
                 sType           = .RenderPassBeginInfo
@@ -471,6 +481,11 @@ impl HelloTriangleApplication {
                 clearValueCount = 1
                 pClearValues    = ^clear_color
             )
+            // render imgui
+
+            vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
+            vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
+
             vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
             vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline)
             
@@ -494,6 +509,10 @@ impl HelloTriangleApplication {
             for 0..1 {
                 vkCmdDraw(frame.command_buffer, 3, 1, 0, 0)
             }
+            vkCmdEndRenderPass(frame.command_buffer)
+
+            vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
+            ImGui_ImplVulkan_RenderDrawData(imgui.GetDrawData(), frame.command_buffer, null)
             vkCmdEndRenderPass(frame.command_buffer)
             vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 1)
 
@@ -619,8 +638,101 @@ impl HelloTriangleApplication {
 
         try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
         try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
-        try(self.create_command_buffers())
-        try(self.create_sync_objects())
+
+        //
+        pool_sizes := [
+            VkDescriptorPoolSize(.Sampler, 1000)
+            VkDescriptorPoolSize(.CombinedImageSampler, 1000)
+            VkDescriptorPoolSize(.SampledImage, 1000)
+            VkDescriptorPoolSize(.StorageImage, 1000)
+            VkDescriptorPoolSize(.UniformTexelBuffer, 1000)
+            VkDescriptorPoolSize(.StorageTexelBuffer, 1000)
+            VkDescriptorPoolSize(.UniformBuffer, 1000)
+            VkDescriptorPoolSize(.StorageBuffer, 1000)
+            VkDescriptorPoolSize(.UniformBufferDynamic, 1000)
+            VkDescriptorPoolSize(.StorageBufferDynamic, 1000)
+            VkDescriptorPoolSize(.InputAttachment, 1000)
+        ]
+        descriptor_pool_info := VkDescriptorPoolCreateInfo(
+            sType           = .DescriptorPoolCreateInfo
+            flags           = .FreeDescriptorSetBit or .UpdateAfterBindBit
+            maxSets         = cast 1000 * pool_sizes.length
+            poolSizeCount   = cast pool_sizes.length
+            pPoolSizes      = pool_sizes.data
+        )
+        vk_try(vkCreateDescriptorPool(self.context.device.handle, ^descriptor_pool_info, null, ^mut self.descriptor_pool))
+
+        return Ok()
+    }
+
+    init_imgui :: (&mut Self, window: ^GLFWwindow) -> Result[(), String] {
+        context := imgui.CreateContext(null)
+
+        if context == null {
+            return Err(fmt.format("imgui.CreateContext failed"))
+        }
+
+        imgui_io := imgui.GetIO()
+        imgui_io.ConfigFlags = imgui_io.ConfigFlags // or .DockingEnable or .ViewportsEnable
+
+        imgui.StyleColorsDark(null)
+
+        // change corners so they are right angles instead of rounded
+        style := imgui.GetStyle()
+        style.WindowRounding = 0.0
+
+        //
+        if !ImGui_ImplGlfw_InitForVulkan(cast window, false) {
+            return Err(fmt.format("ImGui.ImGui_ImplGlfw_InitForVulkan failed"))
+        }
+
+        init_info := ImGui_ImplVulkan_InitInfo(
+            Instance        = self.context.instance.handle
+            PhysicalDevice  = self.context.physical_device.handle
+            Device          = self.context.device.handle
+            QueueFamily     = cast self.context.graphics_queue_family
+            Queue           = self.context.graphics_queue.handle
+            PipelineCache   = self.pipeline_cache
+            DescriptorPool  = self.descriptor_pool
+            MinImageCount   = cast self.surface_capabilities.unwrap_ref().capabilities.minImageCount
+            ImageCount      = cast self.surface_capabilities.unwrap_ref().capabilities.minImageCount
+            MSAASamples     = ._1Bit
+            Allocator       = null
+            CheckVkResultFn = (err) => {
+                if err != 0 {
+                    io.formatln("[ImGui] error: {}", [err])
+                }
+            }
+        )
+
+        if !ImGui_ImplVulkan_Init(^init_info, self.render_pass) {
+            return Err(fmt.format("ImGui.ImGui_ImplVulkan_Init failed"))
+        }
+
+        {
+            // Use any command queue
+            command_pool := self.command_pool
+            command_buffer := self.frames[0].command_buffer
+
+            vk_try(vkResetCommandPool(self.context.device.handle, command_pool, .None))
+            begin_info := VkCommandBufferBeginInfo(
+                sType = .CommandBufferBeginInfo
+                flags = .OneTimeSubmitBit
+            )
+            vk_try(vkBeginCommandBuffer(command_buffer, ^begin_info))
+
+            ImGui_ImplVulkan_CreateFontsTexture(command_buffer)
+
+            end_info := VkSubmitInfo(
+                sType = .SubmitInfo
+                commandBufferCount = 1
+                pCommandBuffers = ^command_buffer
+            )
+            vk_try(vkEndCommandBuffer(command_buffer))
+            vk_try(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^end_info, null))
+            vk_try(vkDeviceWaitIdle(self.context.device.handle))
+            ImGui_ImplVulkan_DestroyFontUploadObjects()
+        }
 
         return Ok()
     }
@@ -654,7 +766,6 @@ impl HelloTriangleApplication {
         ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
         try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
         try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
-        try(self.create_command_buffers())
 
         return Ok()
     }
@@ -807,8 +918,8 @@ impl HelloTriangleApplication {
 
         color_blend_attachment := VkPipelineColorBlendAttachmentState(
             blendEnable         = VK_FALSE
-            srcColorBlendFactor = .One
-            dstColorBlendFactor = .Zero
+            srcColorBlendFactor = .SrcAlpha
+            dstColorBlendFactor = .OneMinusSrcAlpha
             colorBlendOp        = .Add
             srcAlphaBlendFactor = .One
             dstAlphaBlendFactor = .Zero
@@ -862,7 +973,15 @@ impl HelloTriangleApplication {
             basePipelineIndex   = -1
         )
 
-        vk_try(vkCreateGraphicsPipelines(self.context.device.handle, null, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
+        pipeline_cache_info := VkPipelineCacheCreateInfo(
+            sType = .PipelineCacheCreateInfo
+            flags = .None
+            initialDataSize = 0
+            pInitialData = null
+        )
+        vk_try(vkCreatePipelineCache(self.context.device.handle, ^pipeline_cache_info, null, ^mut self.pipeline_cache))
+
+        vk_try(vkCreateGraphicsPipelines(self.context.device.handle, self.pipeline_cache, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
 
         return Ok()
     }
@@ -879,99 +998,6 @@ impl HelloTriangleApplication {
         )
 
         vk_try(vkCreateCommandPool(self.context.device.handle, ^pool_info, null, ^mut self.command_pool))
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating command buffers
-    //////////////////////////////////////////
-
-    create_command_buffers :: (&mut Self) -> Result[(), String] {
-        self.command_buffers.resize(self.swapchain.get().get_framebuffers().length)
-
-        alloc_info := VkCommandBufferAllocateInfo(
-            sType              = .CommandBufferAllocateInfo
-            commandPool        = self.command_pool
-            level              = .Primary
-            commandBufferCount = cast self.command_buffers.count()
-        )
-
-        vk_try(vkAllocateCommandBuffers(self.context.device.handle, ^alloc_info, self.command_buffers.get_raw_mut()))
-
-        for(by_ref=false) framebuffer, i in self.swapchain.get().get_framebuffers() {
-            begin_info := VkCommandBufferBeginInfo(
-                sType            = .CommandBufferBeginInfo
-                pInheritanceInfo = null
-            )
-
-            vk_try(vkBeginCommandBuffer(*command_buffers[i], ^begin_info))
-
-            clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
-            render_pass_info := VkRenderPassBeginInfo(
-                sType           = .RenderPassBeginInfo
-                renderPass      = self.render_pass
-                framebuffer     = framebuffer
-                renderArea      = VkRect2D(
-                    offset      = VkOffset2D(0, 0)
-                    extent      = self.swapchain.get().extent
-                )
-                clearValueCount = 1
-                pClearValues    = ^clear_color
-            )
-            vkCmdBeginRenderPass(*command_buffers[i], ^render_pass_info, .Inline)
-            vkCmdBindPipeline(*command_buffers[i], .Graphics, self.graphics_pipeline)
-            
-            viewport := VkViewport(
-                x        = 0.0
-                y        = 0.0
-                width    = cast(float) self.swapchain.get().extent.width
-                height   = cast(float) self.swapchain.get().extent.height
-                minDepth = 0.0
-                maxDepth = 1.0
-            )
-
-            scissor := VkRect2D(
-                offset = VkOffset2D(0, 0)
-                extent = self.swapchain.get().extent
-            )
-
-            vkCmdSetViewport(*command_buffers[i], 0, 1, ^viewport)
-            vkCmdSetScissor(*command_buffers[i], 0, 1, ^scissor)
-
-            vkCmdDraw(*command_buffers[i], 3, 1, 0, 0)
-            vkCmdEndRenderPass(*command_buffers[i])
-            vk_try(vkEndCommandBuffer(*command_buffers[i]))
-        }
-
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating semaphores
-    //////////////////////////////////////////
-
-    create_sync_objects :: (&mut Self) -> Result[(), String] {
-        self.sema_image_available.resize(MaxFramesInFlight)
-        self.sema_render_finished.resize(MaxFramesInFlight)
-        self.fences_in_flight.resize(MaxFramesInFlight)
-        self.images_in_flight.resize(self.swapchain.get().images.count())
-
-        semaphore_info := VkSemaphoreCreateInfo(
-            sType = .SemaphoreCreateInfo
-        )
-
-        fence_info := VkFenceCreateInfo(
-            sType = .FenceCreateInfo
-            flags = .SignaledBit
-        )
-
-        for i in 0 .. MaxFramesInFlight {
-            vk_try(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut *self.sema_image_available[i]))
-            vk_try(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut *self.sema_render_finished[i]))
-            vk_try(vkCreateFence(self.context.device.handle, ^fence_info, null, ^mut *self.fences_in_flight[i]))
-        }
 
         return Ok()
     }
