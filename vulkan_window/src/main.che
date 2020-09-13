@@ -393,7 +393,20 @@ impl HelloTriangleApplication {
         while glfwWindowShouldClose(window) == 0 {
             cpu_start := glfwGetTime()
             glfwPollEvents()
+
+            // imgui
+            {
+                ImGui_ImplVulkan_NewFrame()
+                ImGui_ImplGlfw_NewFrame()
+                imgui.NewFrame()
+                self.on_imgui()
+                imgui.Render()
+            }
+
+            // render
             draw_frame()
+
+            // 
             cpu_end := glfwGetTime()
 
             { // calculate timing and set title
@@ -420,29 +433,14 @@ impl HelloTriangleApplication {
         vkDeviceWaitIdle(self.context.device.handle)
     }
 
-    draw_frame :: (&mut Self) {
-        ImGui_ImplVulkan_NewFrame()
-        ImGui_ImplGlfw_NewFrame()
-        imgui.NewFrame()
-        {
-            show_demo_window := true
-            if show_demo_window then
-                imgui.ShowDemoWindow(^show_demo_window)
-        }
-        imgui.Render()
-
-        defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
-        frame : &mut FrameData = self.frames[self.current_frame]
-
-        // acquire image
+    prepare_frame :: (&mut Self, frame: &FrameData) -> u32 {
         image_index : u32 = default
-        match vkAcquireNextImageKHR(self.context.device.handle, self.swapchain.get().handle, u64.max, frame.sema_acquire, null, ^image_index) {
-            .Success -> {}
-            .SuboptimalKhr -> {}
+        loop match vkAcquireNextImageKHR(self.context.device.handle, self.swapchain.get().handle, u64.max, frame.sema_acquire, null, ^image_index) {
+            .Success -> { return image_index }
+            .SuboptimalKhr -> { return image_index }
 
             .ErrorOutOfDateKhr -> {
                 self.recreate_swapchains()
-                return
             }
 
             $err -> {
@@ -450,91 +448,130 @@ impl HelloTriangleApplication {
                 @assert(false)
             }
         }
+        @assert(false)
+        return 0
+    }
+
+    on_imgui :: (&mut Self) {
+        self.create_dock_space()
+        show_demo_window := true
+            if show_demo_window then
+                imgui.ShowDemoWindow(^show_demo_window)
+    }
+
+    on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer) {
+        sema_render := [frame.sema_render]
+        sema_acquire := [frame.sema_acquire]
+
+        vkResetCommandBuffer(frame.command_buffer, .None)
+        begin_info := VkCommandBufferBeginInfo(
+            sType = .CommandBufferBeginInfo
+        )
+
+        vk_assert(vkBeginCommandBuffer(frame.command_buffer, ^begin_info))
+
+        clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
+        render_pass_info := VkRenderPassBeginInfo(
+            sType           = .RenderPassBeginInfo
+            renderPass      = self.render_pass
+            framebuffer     = framebuffer
+            renderArea      = VkRect2D(
+                offset      = VkOffset2D(0, 0)
+                extent      = self.swapchain.get().extent
+            )
+            clearValueCount = 1
+            pClearValues    = ^clear_color
+        )
+        // render imgui
+
+        vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
+        vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
+
+        vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
+        vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline)
+        
+        viewport := VkViewport(
+            x        = 0.0
+            y        = 0.0
+            width    = cast(float) self.swapchain.get().extent.width
+            height   = cast(float) self.swapchain.get().extent.height
+            minDepth = 0.0
+            maxDepth = 1.0
+        )
+
+        scissor := VkRect2D(
+            offset = VkOffset2D(0, 0)
+            extent = self.swapchain.get().extent
+        )
+
+        vkCmdSetViewport(frame.command_buffer, 0, 1, ^viewport)
+        vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
+
+        for 0..1 {
+            vkCmdDraw(frame.command_buffer, 3, 1, 0, 0)
+        }
+        vkCmdEndRenderPass(frame.command_buffer)
+
+        // render imgui stuff into command buffer
+        vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
+        ImGui_ImplVulkan_RenderDrawData(imgui.GetDrawData(), frame.command_buffer, null)
+        vkCmdEndRenderPass(frame.command_buffer)
+
+        // end measure of gpu time
+        vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 1)
+
+        vk_assert(vkEndCommandBuffer(frame.command_buffer))
+
+        wait_stages := [VkPipelineStageFlagBits.ColorAttachmentOutputBit]
+        submit_info := VkSubmitInfo(
+            sType                = .SubmitInfo
+            waitSemaphoreCount   = cast sema_acquire.length
+            pWaitSemaphores      = sema_acquire.data
+            pWaitDstStageMask    = wait_stages.data
+            commandBufferCount   = 1
+            pCommandBuffers      = ^frame.command_buffer
+            signalSemaphoreCount = cast sema_render.length
+            pSignalSemaphores    = sema_render.data
+        )
+
+        vkResetFences(self.context.device.handle, 1, ^frame.fence_draw_done)
+        vk_assert(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^submit_info, frame.fence_draw_done))
+    }
+
+    draw_frame :: (&mut Self) {
+
+        defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
+        frame : &mut FrameData = self.frames[self.current_frame]
+
+        // acquire image
+        image_index := self.prepare_frame(frame)
 
         // wait for previous frame to be finished
         wait_start := glfwGetTime()
         vk_assert(vkWaitForFences(self.context.device.handle, 1, ^frame.fence_draw_done, VK_TRUE, u64.max))
         wait_end := glfwGetTime()
         self.frame_statistics.wait_time = self.frame_statistics.avg_speed * (wait_end - wait_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.wait_time
+
+        // get queries from old frame
         vkGetQueryPoolResults(self.context.device.handle, frame.query_pool, 0, cast frame.query_results.length, @sizeof(@typeof(frame.query_results)), cast frame.query_results.data, @sizeof(u64), ._64Bit)
 
         // render frame
-        sema_render := [frame.sema_render]
-        sema_acquire := [frame.sema_acquire]
-        {
-            vkResetCommandBuffer(frame.command_buffer, .None)
-            begin_info := VkCommandBufferBeginInfo(
-                sType = .CommandBufferBeginInfo
-            )
+        self.on_render(frame, *self.swapchain.get().get_framebuffers()[int(image_index)])
 
-            vk_assert(vkBeginCommandBuffer(frame.command_buffer, ^begin_info))
-
-            clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
-            render_pass_info := VkRenderPassBeginInfo(
-                sType           = .RenderPassBeginInfo
-                renderPass      = self.render_pass
-                framebuffer     = *self.swapchain.get().get_framebuffers()[int(image_index)]
-                renderArea      = VkRect2D(
-                    offset      = VkOffset2D(0, 0)
-                    extent      = self.swapchain.get().extent
-                )
-                clearValueCount = 1
-                pClearValues    = ^clear_color
-            )
-            // render imgui
-
-            vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
-            vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
-
-            vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
-            vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline)
-            
-            viewport := VkViewport(
-                x        = 0.0
-                y        = 0.0
-                width    = cast(float) self.swapchain.get().extent.width
-                height   = cast(float) self.swapchain.get().extent.height
-                minDepth = 0.0
-                maxDepth = 1.0
-            )
-
-            scissor := VkRect2D(
-                offset = VkOffset2D(0, 0)
-                extent = self.swapchain.get().extent
-            )
-
-            vkCmdSetViewport(frame.command_buffer, 0, 1, ^viewport)
-            vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
-
-            for 0..1 {
-                vkCmdDraw(frame.command_buffer, 3, 1, 0, 0)
-            }
-            vkCmdEndRenderPass(frame.command_buffer)
-
-            vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
-            ImGui_ImplVulkan_RenderDrawData(imgui.GetDrawData(), frame.command_buffer, null)
-            vkCmdEndRenderPass(frame.command_buffer)
-            vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 1)
-
-            vk_assert(vkEndCommandBuffer(frame.command_buffer))
-
-            wait_stages := [VkPipelineStageFlagBits.ColorAttachmentOutputBit]
-            submit_info := VkSubmitInfo(
-                sType                = .SubmitInfo
-                waitSemaphoreCount   = cast sema_acquire.length
-                pWaitSemaphores      = sema_acquire.data
-                pWaitDstStageMask    = wait_stages.data
-                commandBufferCount   = 1
-                pCommandBuffers      = ^frame.command_buffer
-                signalSemaphoreCount = cast sema_render.length
-                pSignalSemaphores    = sema_render.data
-            )
-
-            vkResetFences(self.context.device.handle, 1, ^frame.fence_draw_done)
-            vk_assert(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^submit_info, frame.fence_draw_done))
+        // render imgui viewports
+        imgui_io := imgui.GetIO()
+        if imgui.ImGuiConfigFlags.ViewportsEnable is in imgui_io.ConfigFlags {
+            imgui.UpdatePlatformWindows()
+            imgui.RenderPlatformWindowsDefault(null, null)
         }
 
         // present image
+        self.present(image_index, frame)
+    }
+
+    /// present the rendered data in the graphics queue to the swapchain image
+    present :: (&mut Self, image_index: u32, frame: &FrameData) {
+        sema_render := [frame.sema_render]
         swapchains := [self.swapchain.get().handle]
         present_info := VkPresentInfoKHR(
             sType              = .PresentInfoKhr
@@ -562,8 +599,63 @@ impl HelloTriangleApplication {
 
         if self.framebuffer_resized {
             self.recreate_swapchains()
-            return
         }
+    }
+
+    create_dock_space :: (&mut Self) {
+        dockspace_flags     := imgui.ImGuiDockNodeFlags.None
+        mut window_flags    := imgui.ImGuiWindowFlags.MenuBar or imgui.ImGuiWindowFlags.NoDocking
+
+        opt_fullscreen := true
+        if opt_fullscreen {
+            pivot := imgui.ImVec2(0, 0)
+
+            viewport := imgui.GetMainViewport()
+            imgui.SetNextWindowPos(&viewport.Pos, .None, &pivot)
+            imgui.SetNextWindowSize(&viewport.Size, .None)
+            imgui.SetNextWindowViewport(viewport.ID)
+            imgui.PushStyleVar(imgui.ImGuiStyleVar.WindowRounding, 0.0f)
+            imgui.PushStyleVar(imgui.ImGuiStyleVar.WindowBorderSize, 0.0f)
+            window_flags = window_flags or
+                .NoTitleBar or
+                .NoCollapse or
+                .NoResize or
+                .NoMove or
+                .NoBringToFrontOnFocus or
+                .NoNavFocus
+        }
+
+        // When using imguiDockNodeFlags_PassthruCentralNode, DockSpace() will render our background 
+        // and handle the pass-thru hole, so we ask Begin() to not render a background.
+        if imgui.ImGuiDockNodeFlags.PassthruCentralNode is in dockspace_flags {
+            window_flags = window_flags or imgui.ImGuiWindowFlags.NoBackground
+        }
+
+        // Important: note that we proceed even if Begin() returns false (aka window is collapsed).
+        // This is because we want to keep our DockSpace() active. If a DockSpace() is inactive,
+        // all active windows docked into it will lose their parent and become undocked.
+        // We cannot preserve the docking relationship between an active window and an inactive docking, otherwise
+        // any change of dockspace/settings would lead to windows being stuck in limbo and never being visible.
+        window_padding := imgui.ImVec2(0.0f, 0.0f)
+        imgui.PushStyleVarVec(imgui.ImGuiStyleVar.WindowPadding, &window_padding)
+
+        open := true
+        imgui.Begin("DockSpace Demo", ^open, window_flags)
+        imgui.PopStyleVar(1)
+
+        if opt_fullscreen then imgui.PopStyleVar(2)
+
+        // DockSpace
+        io := imgui.GetIO()
+        if imgui.ImGuiConfigFlags.DockingEnable is in io.ConfigFlags {
+            dockspace_id := imgui.GetID("MyDockSpace")
+            size := imgui.ImVec2(0.0f, 0.0f)
+            imgui.DockSpace(dockspace_id, &size, dockspace_flags, null)
+        } else {
+            @assert(false)
+        }
+
+        imgui.End()
     }
 }
 
@@ -673,7 +765,7 @@ impl HelloTriangleApplication {
         }
 
         imgui_io := imgui.GetIO()
-        imgui_io.ConfigFlags = imgui_io.ConfigFlags // or .DockingEnable or .ViewportsEnable
+        imgui_io.ConfigFlags = imgui_io.ConfigFlags or .DockingEnable or .ViewportsEnable
 
         imgui.StyleColorsDark(null)
 
