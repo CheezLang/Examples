@@ -237,6 +237,9 @@ HelloTriangleApplication :: struct {
     frames                  := Array[FrameData].new()
     frame_statistics        := FrameStatistics()
 
+    clear_color             : [4]f32 = [0.1, 0.1, 0.1, 1.0]
+    show_demo_window        := false
+
     // query_result_buffer     : VkBuffer = null
     // query_result_buffer_mem : VkDeviceMemory = null
     // query_result_buffer_ptr : []u64 = []
@@ -394,15 +397,6 @@ impl HelloTriangleApplication {
             cpu_start := glfwGetTime()
             glfwPollEvents()
 
-            // imgui
-            {
-                ImGui_ImplVulkan_NewFrame()
-                ImGui_ImplGlfw_NewFrame()
-                imgui.NewFrame()
-                self.on_imgui()
-                imgui.Render()
-            }
-
             // render
             draw_frame()
 
@@ -433,6 +427,47 @@ impl HelloTriangleApplication {
         vkDeviceWaitIdle(self.context.device.handle)
     }
 
+    draw_frame :: (&mut Self) {
+        // imgui
+        {
+            ImGui_ImplVulkan_NewFrame()
+            ImGui_ImplGlfw_NewFrame()
+            imgui.NewFrame()
+            self.on_imgui()
+            imgui.Render()
+        }
+
+        defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
+        frame : &mut FrameData = self.frames[self.current_frame]
+
+        // acquire image
+        image_index := self.prepare_frame(frame)
+
+        // wait for previous frame to be finished
+        wait_start := glfwGetTime()
+        vk_assert(vkWaitForFences(self.context.device.handle, 1, ^frame.fence_draw_done, VK_TRUE, u64.max))
+        wait_end := glfwGetTime()
+        self.frame_statistics.wait_time = self.frame_statistics.avg_speed * (wait_end - wait_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.wait_time
+
+        // get queries from old frame
+        vkGetQueryPoolResults(self.context.device.handle, frame.query_pool, 0, cast frame.query_results.length, @sizeof(@typeof(frame.query_results)), cast frame.query_results.data, @sizeof(u64), ._64Bit)
+
+        // render frame
+        swapchain := self.swapchain.get()
+        self.on_render(frame, *swapchain.get_framebuffers()[int(image_index)], *swapchain.get_images()[int(image_index)])
+
+        // render imgui viewports
+        imgui_io := imgui.GetIO()
+        if imgui.ImGuiConfigFlags.ViewportsEnable is in imgui_io.ConfigFlags {
+            imgui.UpdatePlatformWindows()
+            imgui.RenderPlatformWindowsDefault(null, null)
+        }
+
+        // present image
+        self.present(image_index, frame)
+    }
+
+    /// acquires next image from swapchain and recreates swapchain if necessary
     prepare_frame :: (&mut Self, frame: &FrameData) -> u32 {
         image_index : u32 = default
         loop match vkAcquireNextImageKHR(self.context.device.handle, self.swapchain.get().handle, u64.max, frame.sema_acquire, null, ^image_index) {
@@ -452,14 +487,42 @@ impl HelloTriangleApplication {
         return 0
     }
 
-    on_imgui :: (&mut Self) {
-        self.create_dock_space()
-        show_demo_window := true
-            if show_demo_window then
-                imgui.ShowDemoWindow(^show_demo_window)
-    }
+    /// present the rendered data in the graphics queue to the swapchain image
+    present :: (&mut Self, image_index: u32, frame: &FrameData) {
+        sema_render := [frame.sema_render]
+        swapchains := [self.swapchain.get().handle]
+        present_info := VkPresentInfoKHR(
+            sType              = .PresentInfoKhr
+            waitSemaphoreCount = cast sema_render.length
+            pWaitSemaphores    = sema_render.data
+            swapchainCount     = cast swapchains.length
+            pSwapchains        = swapchains.data
+            pImageIndices      = ^image_index
+            pResults           = null
+        )
+        match vkQueuePresentKHR(self.context.present_queue.handle, ^present_info) {
+            .Success -> {}
+            .SuboptimalKhr -> {}
 
-    on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer) {
+            .ErrorOutOfDateKhr -> {
+                self.recreate_swapchains()
+                return
+            }
+
+            $err -> {
+                io.formatln("[Vulkan Error] vkQueuePresentKHR returned {}", [err])
+                @assert(false)
+            }
+        }
+
+        if self.framebuffer_resized {
+            self.recreate_swapchains()
+        }
+    }
+}
+
+impl HelloTriangleApplication {
+    on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage) {
         sema_render := [frame.sema_render]
         sema_acquire := [frame.sema_acquire]
 
@@ -470,7 +533,7 @@ impl HelloTriangleApplication {
 
         vk_assert(vkBeginCommandBuffer(frame.command_buffer, ^begin_info))
 
-        clear_color := VkClearValue.color(VkClearColorValue.float32([0.1, 0.1, 0.1, 1.0]))
+        clear_color := VkClearValue.color(VkClearColorValue.float32(self.clear_color))
         render_pass_info := VkRenderPassBeginInfo(
             sType           = .RenderPassBeginInfo
             renderPass      = self.render_pass
@@ -510,10 +573,37 @@ impl HelloTriangleApplication {
         for 0..1 {
             vkCmdDraw(frame.command_buffer, 3, 1, 0, 0)
         }
-        vkCmdEndRenderPass(frame.command_buffer)
 
         // render imgui stuff into command buffer
-        vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
+        image_memory_barrier := VkImageMemoryBarrier(
+            sType = .ImageMemoryBarrier
+            srcAccessMask = .ColorAttachmentWriteBit
+            dstAccessMask = .ColorAttachmentWriteBit
+            oldLayout = .ColorAttachmentOptimal
+            newLayout = .ColorAttachmentOptimal
+            srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+            dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+            image = image
+            subresourceRange = VkImageSubresourceRange(
+                aspectMask = .ColorBit
+                baseMipLevel = 0
+                levelCount = 1
+                baseArrayLayer = 0
+                layerCount = 1
+            )
+        )
+        vkCmdPipelineBarrier(
+            _commandBuffer = frame.command_buffer
+            _srcStageMask = .ColorAttachmentOutputBit
+            _dstStageMask = .ColorAttachmentOutputBit
+            _dependencyFlags = .ByRegionBit
+            _memoryBarrierCount = 0
+            _pMemoryBarriers = null
+            _bufferMemoryBarrierCount = 0
+            _pBufferMemoryBarriers = null
+            _imageMemoryBarrierCount = 1
+            _pImageMemoryBarriers = ^image_memory_barrier
+        )
         ImGui_ImplVulkan_RenderDrawData(imgui.GetDrawData(), frame.command_buffer, null)
         vkCmdEndRenderPass(frame.command_buffer)
 
@@ -538,72 +628,22 @@ impl HelloTriangleApplication {
         vk_assert(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^submit_info, frame.fence_draw_done))
     }
 
-    draw_frame :: (&mut Self) {
+    on_imgui :: (&mut Self) {
+        // self.create_dock_space()
+        if self.show_demo_window then
+            imgui.ShowDemoWindow(^mut self.show_demo_window)
 
-        defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
-        frame : &mut FrameData = self.frames[self.current_frame]
-
-        // acquire image
-        image_index := self.prepare_frame(frame)
-
-        // wait for previous frame to be finished
-        wait_start := glfwGetTime()
-        vk_assert(vkWaitForFences(self.context.device.handle, 1, ^frame.fence_draw_done, VK_TRUE, u64.max))
-        wait_end := glfwGetTime()
-        self.frame_statistics.wait_time = self.frame_statistics.avg_speed * (wait_end - wait_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.wait_time
-
-        // get queries from old frame
-        vkGetQueryPoolResults(self.context.device.handle, frame.query_pool, 0, cast frame.query_results.length, @sizeof(@typeof(frame.query_results)), cast frame.query_results.data, @sizeof(u64), ._64Bit)
-
-        // render frame
-        self.on_render(frame, *self.swapchain.get().get_framebuffers()[int(image_index)])
-
-        // render imgui viewports
-        imgui_io := imgui.GetIO()
-        if imgui.ImGuiConfigFlags.ViewportsEnable is in imgui_io.ConfigFlags {
-            imgui.UpdatePlatformWindows()
-            imgui.RenderPlatformWindowsDefault(null, null)
-        }
-
-        // present image
-        self.present(image_index, frame)
-    }
-
-    /// present the rendered data in the graphics queue to the swapchain image
-    present :: (&mut Self, image_index: u32, frame: &FrameData) {
-        sema_render := [frame.sema_render]
-        swapchains := [self.swapchain.get().handle]
-        present_info := VkPresentInfoKHR(
-            sType              = .PresentInfoKhr
-            waitSemaphoreCount = cast sema_render.length
-            pWaitSemaphores    = sema_render.data
-            swapchainCount     = cast swapchains.length
-            pSwapchains        = swapchains.data
-            pImageIndices      = ^image_index
-            pResults           = null
-        )
-        match vkQueuePresentKHR(self.context.present_queue.handle, ^present_info) {
-            .Success -> {}
-            .SuboptimalKhr -> {}
-
-            .ErrorOutOfDateKhr -> {
-                self.recreate_swapchains()
-                return
-            }
-
-            $err -> {
-                io.formatln("[Vulkan Error] vkQueuePresentKHR returned {}", [err])
-                @assert(false)
-            }
-        }
-
-        if self.framebuffer_resized {
-            self.recreate_swapchains()
+        mut show_settings := true
+        imgui.Begin("Settings", ^mut show_settings, .None)
+        defer imgui.End()
+        {
+            imgui.Checkbox("Show demo window", ^mut self.show_demo_window)
+            imgui.ColorPicker3("Clear color", self.clear_color.data, .RGB)
         }
     }
 
     create_dock_space :: (&mut Self) {
-        dockspace_flags     := imgui.ImGuiDockNodeFlags.None
+        dockspace_flags     := imgui.ImGuiDockNodeFlags.None or .PassthruCentralNode
         mut window_flags    := imgui.ImGuiWindowFlags.MenuBar or imgui.ImGuiWindowFlags.NoDocking
 
         opt_fullscreen := true
@@ -883,35 +923,49 @@ impl HelloTriangleApplication {
             layout     = .ColorAttachmentOptimal
         )
 
-        subpass := VkSubpassDescription(
-            pipelineBindPoint       = .Graphics
-            inputAttachmentCount    = 0
-            pInputAttachments       = null
-            colorAttachmentCount    = 1
-            pColorAttachments       = ^color_attachment_ref
-            pResolveAttachments     = null
-            pDepthStencilAttachment = null
-            preserveAttachmentCount = 0
-            pPreserveAttachments    = null
-        )
+        subpasses := [
+            VkSubpassDescription(
+                pipelineBindPoint       = .Graphics
+                inputAttachmentCount    = 0
+                pInputAttachments       = null
+                colorAttachmentCount    = 1
+                pColorAttachments       = ^color_attachment_ref
+                pResolveAttachments     = null
+                pDepthStencilAttachment = null
+                preserveAttachmentCount = 0
+                pPreserveAttachments    = null
+            )
+        ]
 
-        dependency := VkSubpassDependency(
-            srcSubpass      = VK_SUBPASS_EXTERNAL
-            dstSubpass      = 0
-            srcStageMask    = .ColorAttachmentOutputBit
-            dstStageMask    = .ColorAttachmentOutputBit
-            srcAccessMask   = .None
-            dstAccessMask   = .ColorAttachmentWriteBit
-        )
+        dependencies := [
+            VkSubpassDependency(
+                srcSubpass      = VK_SUBPASS_EXTERNAL
+                dstSubpass      = 0
+                srcStageMask    = .ColorAttachmentOutputBit
+                dstStageMask    = .ColorAttachmentOutputBit
+                srcAccessMask   = .None
+                dstAccessMask   = .ColorAttachmentWriteBit
+                dependencyFlags = .None
+            )
+            VkSubpassDependency(
+                srcSubpass      = 0
+                dstSubpass      = 0
+                srcStageMask    = .ColorAttachmentOutputBit
+                dstStageMask    = .ColorAttachmentOutputBit
+                srcAccessMask   = .ColorAttachmentWriteBit
+                dstAccessMask   = .ColorAttachmentWriteBit
+                dependencyFlags = .ByRegionBit
+            )
+        ]
 
         render_pass_info := VkRenderPassCreateInfo(
             sType           = .RenderPassCreateInfo
             attachmentCount = 1
             pAttachments    = ^color_attachment
-            subpassCount    = 1
-            pSubpasses      = ^subpass
-            dependencyCount = 1
-            pDependencies   = ^dependency
+            subpassCount    = cast subpasses.length
+            pSubpasses      = subpasses.data
+            dependencyCount = cast dependencies.length
+            pDependencies   = dependencies.data
         )
 
         vk_try(vkCreateRenderPass(self.context.device.handle, ^render_pass_info, null, ^mut self.render_pass))
