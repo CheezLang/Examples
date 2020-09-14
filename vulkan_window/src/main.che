@@ -18,6 +18,8 @@ use import vulkan
 use import vulkan_utils
 use import spirv_cross
 
+clap :: import clap.clap
+
 imgui :: import imgui
 use import imgui_glfw
 use import imgui_vulkan
@@ -63,9 +65,9 @@ vulkan_debug_callback :: (
 }
 
 Main :: () {
+    args := clap.get_cmd_args()
     hello_triangle_app := HelloTriangleApplication.new()
-
-    match hello_triangle_app.run() {
+    match hello_triangle_app.run(args.slice()[1..]) {
         Ok(_) -> {}
         Err($msg) -> {
             io.formatln("[Vulkan Error] {}", [msg])
@@ -243,6 +245,7 @@ HelloTriangleApplication :: struct {
     clear_color             : [4]f32 = [0.1, 0.1, 0.1, 1.0]
     show_demo_window        := false
 
+    mesh_file               := String.with_capacity(256)
     mesh                    := Rc[ObjMesh].empty()
     mesh_vertex_buffer      := vk.Buffer()
     mesh_index_buffer       := vk.Buffer()
@@ -254,14 +257,14 @@ impl HelloTriangleApplication {
     }
 
 
-    run :: (&mut Self) -> Result[(), String] {
+    run :: (&mut Self, args: []String) -> Result[(), String] {
         defer self.cleanup()
 
         // init stuff
         try(self.init_window())
         try(self.init_vulkan())
 
-        try(self.on_init())
+        try(self.on_init(args))
 
 
         // imgui setup
@@ -331,7 +334,6 @@ impl HelloTriangleApplication {
 
     main_loop :: (&mut Self) {
         glfwShowWindow(window)
-        mut window_title := String.empty()
 
         while glfwWindowShouldClose(window) == 0 {
             cpu_start := glfwGetTime()
@@ -342,26 +344,9 @@ impl HelloTriangleApplication {
 
             // 
             cpu_end := glfwGetTime()
-
-            { // calculate timing and set title
-                frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
-                timestamp_period := f64(self.context.physical_device.properties.limits.timestampPeriod)
-
-                self.frame_statistics.cpu_time = self.frame_statistics.avg_speed * (cpu_end - cpu_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.cpu_time
-                self.frame_statistics.gpu_time = self.frame_statistics.avg_speed * f64(*frame.query_results[1] - *frame.query_results[0]) * timestamp_period * 0.000001 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.gpu_time
-
-                mut fps := 0.0
-                if self.frame_statistics.cpu_time != 0 {
-                    fps = 1000.0 / self.frame_statistics.cpu_time
-                }
-
-                window_title.clear()
-                fmt.format_into(&mut window_title, "Vulkan Test - CPU: {:.2}ms, wait: {:.2}ms ({:.1} fps), GPU: {:.2}ms", [
-                    self.frame_statistics.cpu_time, self.frame_statistics.wait_time, fps
-                    self.frame_statistics.gpu_time
-                ])
-                glfwSetWindowTitle(self.window, cast window_title.as_cstring())
-            }
+            frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
+            timestamp_period := f64(self.context.physical_device.properties.limits.timestampPeriod)
+            self.frame_statistics.cpu_time = self.frame_statistics.avg_speed * (cpu_end - cpu_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.cpu_time
         }
 
         vkDeviceWaitIdle(self.context.device.handle)
@@ -462,7 +447,7 @@ impl HelloTriangleApplication {
 }
 
 impl HelloTriangleApplication {
-    on_init :: (&mut Self) -> Result[(), String] {
+    on_init :: (&mut Self, args: []String) -> Result[(), String] {
         for i in 0 .. MaxFramesInFlight {
             semaphore_info := VkSemaphoreCreateInfo(
                 sType = .SemaphoreCreateInfo
@@ -498,19 +483,47 @@ impl HelloTriangleApplication {
             self.frames.add(frame)
         }
 
-        self.mesh = Rc[ObjMesh].new(try_with(ObjMesh.from_file("../assets/meshes/rocker-arm.obj"), { return Err(fmt.format("Failed to load model: {}", [err])) }))
-        mesh := self.mesh.get()
+        mesh_files := clap.parse_arguments(Array[String], args)
+        if mesh_files != null {
+            if mesh_files.count() == 0 {
+                return Err(fmt.format("No arguments provided"))
+            }
+            self.load_mesh(mesh_files.access(0).slice())
+        } else {
+            return Err(fmt.format("No arguments provided"))
+        }
 
-        self.mesh_vertex_buffer = try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .VertexBufferBit))
-        self.mesh_index_buffer = try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.triangles.count() * @sizeof(u32), .IndexBufferBit))
+        return Ok()
+    }
+
+    load_mesh :: (&mut Self, mesh_file: string) -> Result[(), String] {
+        mesh_ref := Rc[ObjMesh].new(try_with(ObjMesh.from_file(mesh_file), { return Err(fmt.format("Failed to load model '{}': {}", [mesh_file, err])) }))
+        mesh := mesh_ref.get()
+
+        vertex_buffer := try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .VertexBufferBit))
+        index_buffer := try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.triangles.count() * @sizeof(u32), .IndexBufferBit))
 
         mut vertex_map : ^ObjMesh.Vertex = default
-        vk_try(vkMapMemory(self.context.device.handle, self.mesh_vertex_buffer.memory, 0, cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .None, cast ^mut vertex_map))
+        vk_try(vkMapMemory(self.context.device.handle, vertex_buffer.memory, 0, cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .None, cast ^mut vertex_map))
         C.memcpy(vertex_map, mesh.vertices.get_raw(), cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex))
 
         mut index_map : ^ObjMesh.Vertex = default
-        vk_try(vkMapMemory(self.context.device.handle, self.mesh_index_buffer.memory, 0, cast mesh.triangles.count() * @sizeof(u32), .None, cast ^mut index_map))
+        vk_try(vkMapMemory(self.context.device.handle, index_buffer.memory, 0, cast mesh.triangles.count() * @sizeof(u32), .None, cast ^mut index_map))
         C.memcpy(index_map, mesh.triangles.get_raw(), cast mesh.triangles.count() * @sizeof(u32))
+
+        vkDeviceWaitIdle(self.context.device.handle)
+
+        self.mesh = mesh_ref
+
+        self.mesh_vertex_buffer.destroy(self.context.device.handle)
+        self.mesh_vertex_buffer = vertex_buffer
+
+        self.mesh_index_buffer.destroy(self.context.device.handle)
+        self.mesh_index_buffer = index_buffer
+
+        self.mesh_file.append_string(mesh_file)
+        self.mesh_file.as_cstring()
+        self.mesh_file.clear()
 
         return Ok()
     }
@@ -669,8 +682,48 @@ impl HelloTriangleApplication {
         imgui.Begin("Settings", ^mut show_settings, .None)
         defer imgui.End()
         {
+            { // calculate timing and set title
+                frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
+                timestamp_period := f64(self.context.physical_device.properties.limits.timestampPeriod)
+
+                self.frame_statistics.gpu_time = self.frame_statistics.avg_speed * f64(*frame.query_results[1] - *frame.query_results[0]) * timestamp_period * 0.000001 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.gpu_time
+
+                mut fps := 0.0
+                if self.frame_statistics.cpu_time != 0 {
+                    fps = 1000.0 / self.frame_statistics.cpu_time
+                }
+
+                fps_string := fmt.format("{:.1}", [fps])
+                imgui.LabelText("Fps", fps_string.as_cstring())
+
+                cpu_time := fmt.format("{:.2}ms", [self.frame_statistics.cpu_time])
+                imgui.LabelText("CPU", cpu_time.as_cstring())
+
+                wait_time := fmt.format("{:.2}ms", [self.frame_statistics.wait_time])
+                imgui.LabelText("wait", wait_time.as_cstring())
+
+                gpu_time := fmt.format("{:.2}ms", [self.frame_statistics.gpu_time])
+                imgui.LabelText("CPU", gpu_time.as_cstring())
+            }
+
+            imgui.Separator()
+
             imgui.Checkbox("Show demo window", ^mut self.show_demo_window)
             imgui.ColorPicker3("Clear color", self.clear_color.data, .RGB)
+
+            if imgui.InputText("Mesh"c, cast self.mesh_file.get_raw(), cast self.mesh_file.get_capacity(), .None, null, null) {
+            }
+
+            button_size := imgui.ImVec2(0, 0)
+            if imgui.Button("Reload Mesh"c, &mut button_size) {
+                mesh_file := string.from_cstring(cast self.mesh_file.get_raw())
+                match self.load_mesh(mesh_file) {
+                    Ok(_) -> {}
+                    Err($err) -> {
+                        io.formatln("Failed to load mesh '{}': {}", [mesh_file, err])
+                    }
+                }
+            }
         }
     }
 
@@ -1124,7 +1177,7 @@ impl HelloTriangleApplication {
             rasterizerDiscardEnable = VK_FALSE
             polygonMode             = .Fill
             cullMode                = .BackBit
-            frontFace               = .Clockwise
+            frontFace               = .CounterClockwise
             depthBiasEnable         = VK_FALSE
             depthBiasConstantFactor = 0.0
             depthBiasClamp          = 0.0
