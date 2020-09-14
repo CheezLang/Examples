@@ -21,8 +21,10 @@ use import spirv_cross
 imgui :: import imgui
 use import imgui_glfw
 use import imgui_vulkan
+use import obj
 
 vk :: import vulkan_hl
+
 
 MaxFramesInFlight :: 2
 
@@ -222,6 +224,7 @@ HelloTriangleApplication :: struct {
 
     // vulkan stuff
     context                 : ^VulkanContext = null
+    imgui_context           : ^imgui.ImGuiContext = null
 
     surface_capabilities    := Option[vk.PhysicalDeviceSurfaceCapabilities].None
     swapchain_format        : VkSurfaceFormatKHR = default
@@ -240,9 +243,9 @@ HelloTriangleApplication :: struct {
     clear_color             : [4]f32 = [0.1, 0.1, 0.1, 1.0]
     show_demo_window        := false
 
-    // query_result_buffer     : VkBuffer = null
-    // query_result_buffer_mem : VkDeviceMemory = null
-    // query_result_buffer_ptr : []u64 = []
+    mesh                    := Rc[ObjMesh].empty()
+    mesh_vertex_buffer      := vk.Buffer()
+    mesh_index_buffer       := vk.Buffer()
 }
 
 impl HelloTriangleApplication {
@@ -250,46 +253,6 @@ impl HelloTriangleApplication {
         return HelloTriangleApplication()
     }
 
-    get_memory_type :: (&mut Self, memory_type_bits: u32, flags: VkMemoryPropertyFlagBits) -> Option[u32] {
-        mut properties : VkPhysicalDeviceMemoryProperties = default
-        vkGetPhysicalDeviceMemoryProperties(self.context.physical_device.handle, ^mut properties)
-        for typ in properties.memoryTypes[..i64(properties.memoryTypeCount)] {
-            is_possible_type := @bin_and(@bin_lsl(1, u32(it_index)), memory_type_bits) != 0
-            if is_possible_type and (flags is in typ.propertyFlags) {
-                return .Some(u32(it_index))
-            }
-        }
-        return .None
-    }
-
-    create_buffer :: (&mut Self, size: u64) -> Result[(VkBuffer, VkDeviceMemory), String] {
-        queue_families := [self.context.graphics_queue_family]
-        create_info := VkBufferCreateInfo(
-            sType = .BufferCreateInfo
-            size  = size
-            usage = .TransferDstBit
-            sharingMode = .Exclusive
-            queueFamilyIndexCount = cast queue_families.length
-            pQueueFamilyIndices = queue_families.data
-        )
-
-        mut buffer : VkBuffer = default
-        vk_try(vkCreateBuffer(self.context.device.handle, ^create_info, null, ^mut buffer))
-
-        memory_requirements := VkMemoryRequirements()
-        vkGetBufferMemoryRequirements(self.context.device.handle, buffer, ^mut memory_requirements)
-        allocation_info := VkMemoryAllocateInfo(
-            sType = .MemoryAllocateInfo
-            allocationSize = memory_requirements.size
-            memoryTypeIndex = self.get_memory_type(memory_requirements.memoryTypeBits, .HostVisibleBit or .HostCoherentBit).unwrap()
-        )
-
-        mut memory : VkDeviceMemory = default
-        vk_try(vkAllocateMemory(self.context.device.handle, ^allocation_info, null, ^mut memory))
-        vk_try(vkBindBufferMemory(self.context.device.handle, buffer, memory, 0))
-
-        return Ok(buffer, memory)
-    }
 
     run :: (&mut Self) -> Result[(), String] {
         defer self.cleanup()
@@ -298,40 +261,8 @@ impl HelloTriangleApplication {
         try(self.init_window())
         try(self.init_vulkan())
 
-        for i in 0 .. MaxFramesInFlight {
-            semaphore_info := VkSemaphoreCreateInfo(
-                sType = .SemaphoreCreateInfo
-            )
+        try(self.on_init())
 
-            fence_info := VkFenceCreateInfo(
-                sType = .FenceCreateInfo
-                flags = .SignaledBit
-            )
-
-            mut frame := FrameData()
-            vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_acquire))
-            vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_render))
-            vk_assert(vkCreateFence(self.context.device.handle, ^fence_info, null, ^mut frame.fence_draw_done))
-
-            alloc_info := VkCommandBufferAllocateInfo(
-                sType              = .CommandBufferAllocateInfo
-                commandPool        = self.command_pool
-                level              = .Primary
-                commandBufferCount = 1
-            )
-
-            vk_assert(vkAllocateCommandBuffers(self.context.device.handle, ^alloc_info, ^mut frame.command_buffer))
-
-            query_pool_info := VkQueryPoolCreateInfo(
-                sType               = .QueryPoolCreateInfo
-                queryType           = .Timestamp
-                queryCount          = 100
-                pipelineStatistics  = .None
-            )
-            vk_try(vkCreateQueryPool(self.context.device.handle, ^query_pool_info, null, ^mut frame.query_pool))
-
-            self.frames.add(frame)
-        }
 
         // imgui setup
         try(self.init_imgui(window))
@@ -358,11 +289,20 @@ impl HelloTriangleApplication {
     }
 
     cleanup :: (&mut Self) {
-        // imgui
-        ImGui_ImplVulkan_Shutdown()
-        ImGui_ImplGlfw_Shutdown()
-        imgui.DestroyContext(null)
+        io.formatln("cleanup()")
 
+        // imgui
+        vkDeviceWaitIdle(self.context.device.handle)
+
+        if self.imgui_context != null {
+            ImGui_ImplVulkan_Shutdown()
+            ImGui_ImplGlfw_Shutdown()
+            imgui.DestroyContext(null)
+        }
+
+
+        self.mesh_vertex_buffer.destroy(self.context.device.handle)
+        self.mesh_index_buffer.destroy(self.context.device.handle)
 
         for(by_ref=true) frame in self.frames[..] {
             vkDestroyFence(self.context.device.handle, frame.fence_draw_done, null)
@@ -372,7 +312,7 @@ impl HelloTriangleApplication {
         }
 
         if descriptor_pool != null then vkDestroyDescriptorPool(self.context.device.handle, descriptor_pool, null)
-        if pipeline_cache != null then vkDestroyPipelineCache(self.context.device.handle, pipeline_cache, null)
+        if pipeline_cache  != null then vkDestroyPipelineCache(self.context.device.handle, pipeline_cache, null)
 
         if graphics_pipeline != null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
         if pipeline_layout   != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
@@ -454,7 +394,7 @@ impl HelloTriangleApplication {
 
         // render frame
         swapchain := self.swapchain.get()
-        self.on_render(frame, *swapchain.get_framebuffers()[int(image_index)], *swapchain.get_images()[int(image_index)])
+        self.on_render(frame, *swapchain.get_framebuffers()[int(image_index)], *swapchain.get_images()[int(image_index)], swapchain.get_depth_images()[int(image_index)].handle)
 
         // render imgui viewports
         imgui_io := imgui.GetIO()
@@ -522,7 +462,60 @@ impl HelloTriangleApplication {
 }
 
 impl HelloTriangleApplication {
-    on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage) {
+    on_init :: (&mut Self) -> Result[(), String] {
+        for i in 0 .. MaxFramesInFlight {
+            semaphore_info := VkSemaphoreCreateInfo(
+                sType = .SemaphoreCreateInfo
+            )
+
+            fence_info := VkFenceCreateInfo(
+                sType = .FenceCreateInfo
+                flags = .SignaledBit
+            )
+
+            mut frame := FrameData()
+            vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_acquire))
+            vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_render))
+            vk_assert(vkCreateFence(self.context.device.handle, ^fence_info, null, ^mut frame.fence_draw_done))
+
+            alloc_info := VkCommandBufferAllocateInfo(
+                sType              = .CommandBufferAllocateInfo
+                commandPool        = self.command_pool
+                level              = .Primary
+                commandBufferCount = 1
+            )
+
+            vk_assert(vkAllocateCommandBuffers(self.context.device.handle, ^alloc_info, ^mut frame.command_buffer))
+
+            query_pool_info := VkQueryPoolCreateInfo(
+                sType               = .QueryPoolCreateInfo
+                queryType           = .Timestamp
+                queryCount          = 100
+                pipelineStatistics  = .None
+            )
+            vk_try(vkCreateQueryPool(self.context.device.handle, ^query_pool_info, null, ^mut frame.query_pool))
+
+            self.frames.add(frame)
+        }
+
+        self.mesh = Rc[ObjMesh].new(try_with(ObjMesh.from_file("../assets/meshes/rocker-arm.obj"), { return Err(fmt.format("Failed to load model: {}", [err])) }))
+        mesh := self.mesh.get()
+
+        self.mesh_vertex_buffer = try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .VertexBufferBit))
+        self.mesh_index_buffer = try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.triangles.count() * @sizeof(u32), .IndexBufferBit))
+
+        mut vertex_map : ^ObjMesh.Vertex = default
+        vk_try(vkMapMemory(self.context.device.handle, self.mesh_vertex_buffer.memory, 0, cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .None, cast ^mut vertex_map))
+        C.memcpy(vertex_map, mesh.vertices.get_raw(), cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex))
+
+        mut index_map : ^ObjMesh.Vertex = default
+        vk_try(vkMapMemory(self.context.device.handle, self.mesh_index_buffer.memory, 0, cast mesh.triangles.count() * @sizeof(u32), .None, cast ^mut index_map))
+        C.memcpy(index_map, mesh.triangles.get_raw(), cast mesh.triangles.count() * @sizeof(u32))
+
+        return Ok()
+    }
+
+    on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage, depth: VkImage) {
         sema_render := [frame.sema_render]
         sema_acquire := [frame.sema_acquire]
 
@@ -530,10 +523,12 @@ impl HelloTriangleApplication {
         begin_info := VkCommandBufferBeginInfo(
             sType = .CommandBufferBeginInfo
         )
-
         vk_assert(vkBeginCommandBuffer(frame.command_buffer, ^begin_info))
 
-        clear_color := VkClearValue.color(VkClearColorValue.float32(self.clear_color))
+        clear_values := [
+            VkClearValue.color(VkClearColorValue.float32(self.clear_color))
+            VkClearValue.depthStencil(VkClearDepthStencilValue(1.0, 0))
+        ]
         render_pass_info := VkRenderPassBeginInfo(
             sType           = .RenderPassBeginInfo
             renderPass      = self.render_pass
@@ -542,13 +537,46 @@ impl HelloTriangleApplication {
                 offset      = VkOffset2D(0, 0)
                 extent      = self.swapchain.get().extent
             )
-            clearValueCount = 1
-            pClearValues    = ^clear_color
+            clearValueCount = cast clear_values.length
+            pClearValues    = clear_values.data
         )
         // render imgui
 
         vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
         vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
+
+        // render
+        image_barriers := [
+            VkImageMemoryBarrier(
+                sType               = .ImageMemoryBarrier
+                srcAccessMask       = .None
+                dstAccessMask       = .None
+                oldLayout           = .Undefined
+                newLayout           = .DepthStencilAttachmentOptimal
+                srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+                dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+                image               = depth
+                subresourceRange    = VkImageSubresourceRange(
+                    aspectMask      = .DepthBit
+                    baseMipLevel    = 0
+                    levelCount      = 1
+                    baseArrayLayer  = 0
+                    layerCount      = 1
+                )
+            )
+        ]
+        vkCmdPipelineBarrier(
+            _commandBuffer = frame.command_buffer
+            _srcStageMask = .TransferBit
+            _dstStageMask = .TopOfPipeBit
+            _dependencyFlags = .ByRegionBit
+            _memoryBarrierCount = 0
+            _pMemoryBarriers = null
+            _bufferMemoryBarrierCount = 0
+            _pBufferMemoryBarriers = null
+            _imageMemoryBarrierCount = cast image_barriers.length
+            _pImageMemoryBarriers = image_barriers.data
+        )
 
         vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
         vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline)
@@ -570,8 +598,12 @@ impl HelloTriangleApplication {
         vkCmdSetViewport(frame.command_buffer, 0, 1, ^viewport)
         vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
 
+        vertex_buffer_offset : VkDeviceSize = 0
+        vkCmdBindVertexBuffers(frame.command_buffer, 0, 1, ^self.mesh_vertex_buffer.handle, ^vertex_buffer_offset)
+        vkCmdBindIndexBuffer(frame.command_buffer, self.mesh_index_buffer.handle, 0, .Uint32)
         for 0..1 {
-            vkCmdDraw(frame.command_buffer, 3, 1, 0, 0)
+            // vkCmdDraw(frame.command_buffer, cast self.mesh.get().vertices.count(), 1, 0, 0)
+            vkCmdDrawIndexed(frame.command_buffer, cast self.mesh.get().triangles.count(), 1, 0, 0, 0)
         }
 
         // render imgui stuff into command buffer
@@ -769,6 +801,8 @@ impl HelloTriangleApplication {
         try(self.create_graphics_pipeline())
 
         try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_depth_images(&self.context.device), { return Err(fmt.format("Failed to create swapchain depth images: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_depth_image_views(), { return Err(fmt.format("Failed to create swapchain depth image views: {}", [err])) })
         try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
 
         //
@@ -798,9 +832,9 @@ impl HelloTriangleApplication {
     }
 
     init_imgui :: (&mut Self, window: ^GLFWwindow) -> Result[(), String] {
-        context := imgui.CreateContext(null)
+        self.imgui_context = imgui.CreateContext(null)
 
-        if context == null {
+        if imgui_context == null {
             return Err(fmt.format("imgui.CreateContext failed"))
         }
 
@@ -897,6 +931,8 @@ impl HelloTriangleApplication {
             pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
         ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
         try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_depth_images(&self.context.device), { return Err(fmt.format("Failed to create swapchain depth images: {}", [err])) })
+        try_with(self.swapchain.get_mut().create_depth_image_views(), { return Err(fmt.format("Failed to create swapchain depth image views: {}", [err])) })
         try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
 
         return Ok()
@@ -907,20 +943,37 @@ impl HelloTriangleApplication {
     //////////////////////////////////////////
 
     create_render_pass :: (&mut Self) -> Result[(), String] {
-        color_attachment := VkAttachmentDescription(
-            format         = self.swapchain.get().image_format
-            samples        = ._1Bit
-            loadOp         = .Clear
-            storeOp        = .Store
-            stencilLoadOp  = .DontCare
-            stencilStoreOp = .DontCare
-            initialLayout  = .Undefined
-            finalLayout    = .PresentSrcKhr
-        )
+        attachments := [
+            VkAttachmentDescription(
+                format         = self.swapchain.get().image_format
+                samples        = ._1Bit
+                loadOp         = .Clear
+                storeOp        = .Store
+                stencilLoadOp  = .DontCare
+                stencilStoreOp = .DontCare
+                initialLayout  = .Undefined
+                finalLayout    = .PresentSrcKhr
+            )
+            VkAttachmentDescription(
+                format         = .D32Sfloat
+                samples        = ._1Bit
+                loadOp         = .Clear
+                storeOp        = .DontCare
+                stencilLoadOp  = .DontCare
+                stencilStoreOp = .DontCare
+                initialLayout  = .DepthStencilAttachmentOptimal
+                finalLayout    = .DepthStencilAttachmentOptimal
+            )
+        ]
 
         color_attachment_ref := VkAttachmentReference(
             attachment = 0
             layout     = .ColorAttachmentOptimal
+        )
+
+        depth_stencil_attachment_ref := VkAttachmentReference(
+            attachment  = 1
+            layout      = .DepthStencilAttachmentOptimal
         )
 
         subpasses := [
@@ -931,7 +984,7 @@ impl HelloTriangleApplication {
                 colorAttachmentCount    = 1
                 pColorAttachments       = ^color_attachment_ref
                 pResolveAttachments     = null
-                pDepthStencilAttachment = null
+                pDepthStencilAttachment = ^depth_stencil_attachment_ref
                 preserveAttachmentCount = 0
                 pPreserveAttachments    = null
             )
@@ -960,8 +1013,8 @@ impl HelloTriangleApplication {
 
         render_pass_info := VkRenderPassCreateInfo(
             sType           = .RenderPassCreateInfo
-            attachmentCount = 1
-            pAttachments    = ^color_attachment
+            attachmentCount = cast attachments.length
+            pAttachments    = attachments.data
             subpassCount    = cast subpasses.length
             pSubpasses      = subpasses.data
             dependencyCount = cast dependencies.length
@@ -1016,12 +1069,39 @@ impl HelloTriangleApplication {
 
         shader_stages := [vert_shader_stage_info, frag_shader_stage_info]
 
+        vertex_bindings := [
+            VkVertexInputBindingDescription(
+                binding = 0
+                stride = @sizeof(ObjMesh.Vertex)
+                inputRate = .Vertex
+            )
+        ]
+        vertex_attribs := [
+            VkVertexInputAttributeDescription(
+                location = 0
+                binding = 0
+                format = .R32g32b32Sfloat
+                offset = cast @offsetof(ObjMesh.Vertex, "position")
+            )
+            VkVertexInputAttributeDescription(
+                location = 1
+                binding = 0
+                format = .R32g32Sfloat
+                offset = cast @offsetof(ObjMesh.Vertex, "tex_coord")
+            )
+            VkVertexInputAttributeDescription(
+                location = 2
+                binding = 0
+                format = .R32g32b32Sfloat
+                offset = cast @offsetof(ObjMesh.Vertex, "normal")
+            )
+        ]
         vertex_input_info := VkPipelineVertexInputStateCreateInfo(
             sType                           = .PipelineVertexInputStateCreateInfo
-            vertexBindingDescriptionCount   = 0
-            pVertexBindingDescriptions      = null
-            vertexAttributeDescriptionCount = 0
-            pVertexAttributeDescriptions    = null
+            vertexBindingDescriptionCount   = cast vertex_bindings.length
+            pVertexBindingDescriptions      = vertex_bindings.data
+            vertexAttributeDescriptionCount = cast vertex_attribs.length
+            pVertexAttributeDescriptions    = vertex_attribs.data
         )
 
         input_assembly := VkPipelineInputAssemblyStateCreateInfo(
@@ -1082,6 +1162,17 @@ impl HelloTriangleApplication {
             blendConstants  = [0.0, 0.0, 0.0, 0.0]
         )
 
+        depth_stencil := VkPipelineDepthStencilStateCreateInfo(
+            sType                   = .PipelineDepthStencilStateCreateInfo
+            depthTestEnable         = VK_TRUE
+            depthWriteEnable        = VK_TRUE
+            depthCompareOp          = .LessOrEqual
+            depthBoundsTestEnable   = VK_FALSE
+            stencilTestEnable       = VK_FALSE
+            minDepthBounds          = 0.0
+            maxDepthBounds          = 0.0
+        )
+
         pipline_layout_info := VkPipelineLayoutCreateInfo(
             sType                  = .PipelineLayoutCreateInfo
             setLayoutCount         = 0
@@ -1109,7 +1200,7 @@ impl HelloTriangleApplication {
             pViewportState      = ^viewport_state
             pRasterizationState = ^rasterizer
             pMultisampleState   = ^multisampling
-            pDepthStencilState  = null
+            pDepthStencilState  = ^depth_stencil
             pColorBlendState    = ^color_blending
             pDynamicState       = ^dynamic_state
             layout              = self.pipeline_layout

@@ -129,5 +129,6 @@ void main() {
         color += background(camDir);
     }
 
+    color = fragColor;
     outColor = vec4(color, 1);
 }

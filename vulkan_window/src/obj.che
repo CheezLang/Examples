@@ -1,0 +1,156 @@
+use import std.string
+use import std.array
+use import std.math
+
+fs :: import std.io.fs
+io :: import std.io
+fmt :: import std.fmt
+
+#export_scope
+
+Error :: enum {
+    FsError : fs.FsError
+    ParseError : String
+}
+
+ObjMesh :: struct {
+    Vertex :: struct {
+        position    : Vector3[float] = default
+        normal      : Vector3[float] = default
+        tex_coord   : Vector2[float] = default
+    }
+
+    name        : String
+    vertices    : Array[Vertex]
+    triangles   : Array[u32]
+}
+
+impl ObjMesh {
+    from_file :: (path: string) -> Result[ObjMesh, Error] {
+        file := try_with(fs.read_file(path), {
+            return Err(Error.FsError(err))
+        })
+
+        mut name        := String.empty()
+        mut positions   := Array[Vector3[float]].new()
+        mut normals     := Array[Vector3[float]].new()
+        mut tex_coords  := Array[Vector2[float]].new()
+        mut triangles   := Array[u32].new()
+        mut vertices    := Array[ObjMesh.Vertex].new()
+
+        for line in file.slice().lines() {
+            if line == "" then continue
+            if line.starts_with("o ") {
+                name = line[2..].to_owned()
+            } else if line.starts_with("v ") {
+                parts := try_with(line[2..].split_at_char(' ', true).collect(Array[float]), {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex: {}", [it_index + 1, line])))
+                })
+                if parts.count() != 3 {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex component count: {}", [it_index + 1, line])))
+                }
+                positions.add(Vector3[float](*parts[0], *parts[1], *parts[2]))
+            } else if line.starts_with("vt ") {
+                parts := try_with(line[2..].split_at_char(' ', true).collect(Array[float]), {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex uv: {}", [it_index + 1, line])))
+                })
+                if parts.count() != 2 {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex uv component count: {}", [it_index + 1, line])))
+                }
+                tex_coords.add(Vector2[float](*parts[0], *parts[1]))
+            } else if line.starts_with("vn ") {
+                parts := try_with(line[2..].split_at_char(' ', true).collect(Array[float]), {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex normal: {}", [it_index + 1, line])))
+                })
+                if parts.count() != 3 {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex normal component count: {}", [it_index + 1, line])))
+                }
+                normals.add(Vector3[float](*parts[0], *parts[1], *parts[2]))
+            } else if line.starts_with("f ") {
+                parts := try_with(line[2..].split_at_char(' ', true).collect(Array[string]), {
+                    return Err(Error.ParseError(fmt.format("{} invalid vertex: {}", [it_index + 1, line])))
+                })
+                if parts.count() == 3 {
+                    for part in parts.slice() {
+                        mut vertex := ObjMesh.Vertex()
+                        indices := try_with(part.split_at_char('/', false).collect(Array[string]), {
+                            return Err(Error.ParseError(fmt.format("{} invalid face indices: {}", [it_index + 1, line])))
+                        })
+                        if indices.count() != 3 {
+                            return Err(Error.ParseError(fmt.format("{} invalid vertex normal component count: {}", [it_index + 1, line])))
+                        }
+
+                        if *indices[0] != "" {
+                            i := fmt.parse_int(*indices[0])
+                            vertex.position = *positions[i]
+                        }
+
+                        if *indices[1] != "" {
+                            i := fmt.parse_int(*indices[1])
+                            vertex.tex_coord = *tex_coords[i]
+                        }
+
+                        if *indices[2] != "" {
+                            i := fmt.parse_int(*indices[2])
+                            vertex.normal = *normals[i]
+                        }
+
+                        triangles.add(u32(vertices.count()))
+                        vertices.add(vertex)
+                    }
+                } else if parts.count() == 4 {
+                    sub_parts := parts.slice()
+                    sub_indices := [[0, 1, 2], [0, 2, 3]]
+                    for sub_index in sub_indices[..] {
+                        for index in sub_index[..] {
+                            mut vertex := ObjMesh.Vertex()
+                            indices := try_with(parts[index].split_at_char('/', remove_empty = false).collect(Array[string]), {
+                                return Err(Error.ParseError(fmt.format("{} invalid face indices: {}", [it_index + 1, line])))
+                            })
+                            if indices.count() != 3 {
+                                return Err(Error.ParseError(fmt.format("{} invalid vertex normal component count: {}", [it_index + 1, line])))
+                            }
+
+                            if *indices[0] != "" {
+                                i := fmt.parse_int(*indices[0]) - 1
+                                @assert(i >= 0 and i < positions.count())
+                                vertex.position = *positions[i]
+                            }
+
+                            if *indices[1] != "" {
+                                i := fmt.parse_int(*indices[1]) - 1
+                                @assert(i >= 0 and i < tex_coords.count())
+                                vertex.tex_coord = *tex_coords[i]
+                            }
+
+                            if *indices[2] != "" {
+                                i := fmt.parse_int(*indices[2]) - 1
+                                @assert(i >= 0 and i < normals.count())
+                                vertex.normal = *normals[i]
+                            }
+
+                            triangles.add(u32(vertices.count()))
+                            vertices.add(vertex)
+                        }
+                    }
+                } else {
+                    return Err(Error.ParseError(fmt.format("{} invalid face size: {}", [it_index + 1, line])))
+                }
+            } else if line.starts_with("#") {
+                continue
+            } else {
+                continue
+            }
+
+        }
+
+        io.formatln("mesh: {}
+positions: {}
+normals: {}
+tex_coords: {}
+triangles: {}
+vertices: {}", [name.slice(), positions.count(), normals.count(), tex_coords.count(), triangles.count(), vertices.count()])
+
+        return Ok(ObjMesh(name, vertices, triangles))
+    }
+}
