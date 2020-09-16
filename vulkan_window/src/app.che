@@ -205,7 +205,8 @@ FrameData :: struct {
 
     draw_data_buffer    := Rc[vk.Buffer].empty()
     draw_data           : ^mut DrawData = null
-    descriptor_set      : VkDescriptorSet = null
+    frame_descriptor_set    : VkDescriptorSet = default
+    mesh_descriptor_set     : VkDescriptorSet = default
 }
 
 FrameStatistics :: struct {

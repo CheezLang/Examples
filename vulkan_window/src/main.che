@@ -61,7 +61,7 @@ impl HelloTriangleApplication {
             try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
         ]
         defer { for(by_ref=true) shader in shaders[..] do shader.destroy(self.context.device.handle) }
-        self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..], ObjMesh.Vertex))
+        self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..]))
 
         for i in 0 .. MaxFramesInFlight {
             semaphore_info := VkSemaphoreCreateInfo(
@@ -95,18 +95,21 @@ impl HelloTriangleApplication {
             )
             vk_try(vkCreateQueryPool(self.context.device.handle, ^query_pool_info, null, ^mut frame.query_pool))
 
-            frame.draw_data_buffer = Rc[vk.Buffer].new(try(vk.Buffer.new(&self.context.device, [VK_QUEUE_FAMILY_IGNORED], @sizeof(DrawData), .TransferDstBit or .StorageBufferBit)))
+            frame.draw_data_buffer = Rc[vk.Buffer].new(try(vk.Buffer.new(&self.context.device, [VK_QUEUE_FAMILY_IGNORED], @sizeof(DrawData), .TransferDstBit or .UniformBufferBit)))
             vk_try(vkMapMemory(self.context.device.handle, frame.draw_data_buffer.get().memory, 0, @sizeof(DrawData), .None, cast ^mut frame.draw_data))
             *frame.draw_data = DrawData()
 
-            descriptor_set_layouts := [self.graphics_pipeline.descriptor_set_layout]
+            descriptor_set_layouts := [self.graphics_pipeline.frame_set_layout, self.graphics_pipeline.mesh_set_layout]
             descriptor_alloc_info := VkDescriptorSetAllocateInfo(
                 sType               = .DescriptorSetAllocateInfo
                 descriptorPool      = self.descriptor_pool
                 descriptorSetCount  = cast descriptor_set_layouts.length
                 pSetLayouts         = descriptor_set_layouts.data
             )
-            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, ^mut frame.descriptor_set))
+            mut descriptor_sets : [2]VkDescriptorSet = default
+            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, descriptor_sets.data))
+            frame.frame_descriptor_set = *descriptor_sets[0]
+            frame.mesh_descriptor_set = *descriptor_sets[1]
 
             self.frames.add(frame)
         }
@@ -162,15 +165,31 @@ impl HelloTriangleApplication {
                 range = @sizeof(DrawData)
             )
         ]
+        vertex_buffer_infos := [
+            VkDescriptorBufferInfo(
+                buffer = mesh.get().vertex_buffer.handle
+                offset = 0
+                range = mesh.get().vertex_buffer_size
+            )
+        ]
         write_descriptor_sets := [
             VkWriteDescriptorSet(
                 sType = .WriteDescriptorSet
-                dstSet = frame.descriptor_set
+                dstSet = frame.frame_descriptor_set
                 dstBinding = 0
                 dstArrayElement = 0
                 descriptorCount = cast buffer_infos.length
-                descriptorType = .StorageBuffer
+                descriptorType = .UniformBuffer
                 pBufferInfo = buffer_infos.data
+            )
+            VkWriteDescriptorSet(
+                sType = .WriteDescriptorSet
+                dstSet = frame.mesh_descriptor_set
+                dstBinding = 0
+                dstArrayElement = 0
+                descriptorCount = cast vertex_buffer_infos.length
+                descriptorType = .StorageBuffer
+                pBufferInfo = vertex_buffer_infos.data
             )
         ]
         vkUpdateDescriptorSets(self.context.device.handle, cast write_descriptor_sets.length, write_descriptor_sets.data, 0, null)
@@ -237,10 +256,6 @@ impl HelloTriangleApplication {
             _pImageMemoryBarriers = image_barriers.data
         )
 
-
-        descriptor_sets := [frame.descriptor_set]
-        vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 0, cast descriptor_sets.length, cast descriptor_sets.data, 0, null)
-
         vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
         vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline.handle)
         
@@ -262,8 +277,9 @@ impl HelloTriangleApplication {
         vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
 
         vertex_buffer_offset : VkDeviceSize = 0
-        vkCmdBindVertexBuffers(frame.command_buffer, 0, 1, ^self.mesh.get().vertex_buffer.handle, ^vertex_buffer_offset)
         vkCmdBindIndexBuffer(frame.command_buffer, self.mesh.get().index_buffer.handle, 0, .Uint32)
+        descriptor_sets := [frame.frame_descriptor_set, frame.mesh_descriptor_set]
+        vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 0, cast descriptor_sets.length, cast descriptor_sets.data, 0, null)
         for 0..1 {
             // vkCmdDraw(frame.command_buffer, cast self.mesh.get().vertices.count(), 1, 0, 0)
             vkCmdDrawIndexed(frame.command_buffer, cast self.mesh.get().index_count, 1, 0, 0, 0)

@@ -13,13 +13,14 @@ Error :: enum {
     ParseError : String
 }
 
-ObjMesh :: struct {
-    Vertex :: struct {
-        position    : Vector3[float] = default
-        normal      : Vector3[float] = default
-        tex_coord   : Vector2[float] = default
-    }
+ObjVertex :: struct #align(16) {
+    position    : Vector4[float] = default
+    normal      : Vector4[float] = default
+    tex_coord   : Vector4[float] = default
+}
 
+ObjMesh :: struct {
+    Vertex      :: ObjVertex
     name        : String
     vertices    : Array[Vertex]
     triangles   : Array[u32]
@@ -82,17 +83,17 @@ impl ObjMesh {
 
                         if *indices[0] != "" {
                             i := fmt.parse_int(*indices[0]) - 1
-                            vertex.position = *positions[i]
+                            vertex.position = positions[i].xyz1()
                         }
 
                         if *indices[1] != "" {
                             i := fmt.parse_int(*indices[1]) - 1
-                            vertex.tex_coord = *tex_coords[i]
+                            vertex.tex_coord = tex_coords[i].xy0().xyz0()
                         }
 
                         if *indices[2] != "" {
                             i := fmt.parse_int(*indices[2]) - 1
-                            vertex.normal = *normals[i]
+                            vertex.normal = normals[i].xyz0()
                         }
 
                         triangles.add(u32(vertices.count()))
@@ -114,19 +115,19 @@ impl ObjMesh {
                             if *indices[0] != "" {
                                 i := fmt.parse_int(*indices[0]) - 1
                                 @assert(i >= 0 and i < positions.count())
-                                vertex.position = *positions[i]
+                                vertex.position = positions[i].xyz1()
                             }
 
                             if *indices[1] != "" {
                                 i := fmt.parse_int(*indices[1]) - 1
                                 @assert(i >= 0 and i < tex_coords.count())
-                                vertex.tex_coord = *tex_coords[i]
+                                vertex.tex_coord = tex_coords[i].xy0().xyz0()
                             }
 
                             if *indices[2] != "" {
                                 i := fmt.parse_int(*indices[2]) - 1
                                 @assert(i >= 0 and i < normals.count())
-                                vertex.normal = *normals[i]
+                                vertex.normal = normals[i].xyz0()
                             }
 
                             triangles.add(u32(vertices.count()))
