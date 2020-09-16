@@ -344,8 +344,6 @@ impl HelloTriangleApplication {
         if self.show_demo_window then
             imgui.ShowDemoWindow(^mut self.show_demo_window)
 
-        io.formatln("{}", [imgui.IsKeyDown(imgui.GetKeyIndex(.Space))])
-
         mut show_settings := true
         imgui.Begin("Settings", ^mut show_settings, .None)
         defer imgui.End()
