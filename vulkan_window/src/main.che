@@ -38,7 +38,7 @@ vec2 :: Vector2[f32]
 vec3 :: Vector3[f32]
 vec4 :: Vector4[f32]
 
-MaxFramesInFlight :: 2
+MaxFramesInFlight :: 1
 
 Main :: () {
     args := clap.get_cmd_args()
@@ -52,7 +52,10 @@ Main :: () {
 }
 
 impl HelloTriangleApplication {
-    on_init :: (&mut Self, args: []String) -> Result[(), String] {
+    on_init :: (&mut Self, mut args: []String) -> Result[(), String] {
+        if args.length != 1 {
+            args = ["../assets/meshes/bunny.obj".to_owned()]
+        }
         shaders := [
             try(vk.Shader.new(&self.context.device, "triangle.vert.spv"))
             try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
@@ -321,7 +324,7 @@ impl HelloTriangleApplication {
     }
 
     on_imgui :: (&mut Self) {
-        // self.create_dock_space()
+        self.create_dock_space()
         if self.show_demo_window then
             imgui.ShowDemoWindow(^mut self.show_demo_window)
 
@@ -439,7 +442,8 @@ impl HelloTriangleApplication {
 
     create_dock_space :: (&mut Self) {
         dockspace_flags     := imgui.ImGuiDockNodeFlags.None or .PassthruCentralNode
-        mut window_flags    := imgui.ImGuiWindowFlags.MenuBar or imgui.ImGuiWindowFlags.NoDocking
+        // mut window_flags    := imgui.ImGuiWindowFlags.MenuBar or imgui.ImGuiWindowFlags.NoDocking
+        mut window_flags    := imgui.ImGuiWindowFlags.NoDocking
 
         opt_fullscreen := true
         if opt_fullscreen {

@@ -225,7 +225,7 @@ DrawData :: struct {
 HelloTriangleApplication :: struct {
     // window stuff
     window                  : ^mut GLFWwindow = null
-    window_size             : (x: i32, y: i32) = 800, 600
+    window_size             : (x: i32, y: i32) = 1280, 720
 
     current_frame           := 0
     framebuffer_resized     := false

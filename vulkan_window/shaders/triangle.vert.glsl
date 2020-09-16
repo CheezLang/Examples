@@ -8,6 +8,13 @@ layout(location = 2) in vec2 texCoord;
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 uv;
 
+
+struct Vertex {
+    vec3 position;
+    vec3 normal;
+    vec2 texCoord;
+};
+
 struct DrawData {
     mat4 model;
     mat4 view;
@@ -18,6 +25,9 @@ layout(binding = 0, row_major) readonly buffer DrawDataBuffer {
     DrawData drawData;
 };
 
+layout(binding = 1) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
 
 void main() {
     gl_Position = drawData.proj * drawData.view * drawData.model * vec4(position.xyz * vec3(1, 1, -1) - vec3(0, 0.3, 0), 1);
