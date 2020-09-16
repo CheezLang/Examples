@@ -81,17 +81,17 @@ impl ObjMesh {
                         }
 
                         if *indices[0] != "" {
-                            i := fmt.parse_int(*indices[0])
+                            i := fmt.parse_int(*indices[0]) - 1
                             vertex.position = *positions[i]
                         }
 
                         if *indices[1] != "" {
-                            i := fmt.parse_int(*indices[1])
+                            i := fmt.parse_int(*indices[1]) - 1
                             vertex.tex_coord = *tex_coords[i]
                         }
 
                         if *indices[2] != "" {
-                            i := fmt.parse_int(*indices[2])
+                            i := fmt.parse_int(*indices[2]) - 1
                             vertex.normal = *normals[i]
                         }
 

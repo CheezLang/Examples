@@ -262,6 +262,7 @@ HelloTriangleApplication :: struct {
     mouse_scroll            := vec2()
     scroll_speed            := 0.2f
     mouse_sensitivity       := 0.5f
+    camera_fov              := 50.0f
 }
 
 impl HelloTriangleApplication {
