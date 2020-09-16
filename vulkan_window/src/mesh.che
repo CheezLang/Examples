@@ -1,0 +1,48 @@
+use import std.string
+C :: import std.c
+fmt :: import std.fmt
+
+use import obj
+use import vulkan
+use import vulkan_utils
+vk :: import vulkan_hl
+
+#export_scope
+
+Mesh :: struct {
+    name            : String
+    vertex_buffer   : vk.Buffer
+    index_buffer    : vk.Buffer
+    index_count     : u64
+}
+
+impl Mesh {
+    from_file :: (device: &vk.Device, path: string) -> Result[Mesh, String] {
+        mesh := try_with(ObjMesh.from_file(path), { return Err(fmt.format("Failed to load model '{}': {}", [path, err])) })
+
+        vertex_buffer := try_with(vk.Buffer.new(device, [VK_QUEUE_FAMILY_IGNORED], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .VertexBufferBit), { return Err(fmt.format("{}", [err])) })
+        index_buffer := try_with(vk.Buffer.new(device, [VK_QUEUE_FAMILY_IGNORED], cast mesh.triangles.count() * @sizeof(u32), .IndexBufferBit), { return Err(fmt.format("{}", [err])) })
+
+        mut vertex_map : ^ObjMesh.Vertex = default
+        vk_try(vkMapMemory(device.handle, vertex_buffer.memory, 0, cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .None, cast ^mut vertex_map))
+        C.memcpy(vertex_map, mesh.vertices.get_raw(), cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex))
+        vkUnmapMemory(device.handle, vertex_buffer.memory)
+
+        mut index_map : ^ObjMesh.Vertex = default
+        vk_try(vkMapMemory(device.handle, index_buffer.memory, 0, cast mesh.triangles.count() * @sizeof(u32), .None, cast ^mut index_map))
+        C.memcpy(index_map, mesh.triangles.get_raw(), cast mesh.triangles.count() * @sizeof(u32))
+        vkUnmapMemory(device.handle, index_buffer.memory)
+
+        return Ok(Mesh(
+            name            = mesh.name.clone()
+            vertex_buffer   = vertex_buffer
+            index_buffer    = index_buffer
+            index_count     = cast mesh.triangles.count()
+        ))
+    }
+
+    destroy :: (&Self, device: &vk.Device) {
+        vertex_buffer.destroy(device.handle)
+        index_buffer.destroy(device.handle)
+    }
+}

@@ -14,55 +14,28 @@ C   :: import std.c
 fs  :: import std.io.fs
 
 use import glfw
+
 use import vulkan
 use import vulkan_utils
 use import spirv_cross
+vk :: import vulkan_hl
+
+use import imgui_glfw
+use import imgui_vulkan
+imgui :: import imgui
 
 clap :: import clap.clap
 
-imgui :: import imgui
-use import imgui_glfw
-use import imgui_vulkan
 use import obj
+use import app
+use import mesh
 
-vk :: import vulkan_hl
-
+mat4 :: Matrix4[f32]
+vec2 :: Vector2[f32]
+vec3 :: Vector3[f32]
+vec4 :: Vector4[f32]
 
 MaxFramesInFlight :: 2
-
-enable_validation_layers :: true
-validation_layers := [
-    "VK_LAYER_KHRONOS_validation"c
-]
-device_extensions := [
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME
-]
-
-glfw_error_callback :: (error: i32, description: ^mut char8) {
-    desc := String.from_cstring(description)
-    io.formatln("Glfw Error {}: {}", [error, desc.slice()])
-}
-
-vulkan_debug_callback :: (
-    messageSeverity: VkDebugUtilsMessageSeverityFlagBitsEXT,
-    messageType: VkDebugUtilsMessageTypeFlagsEXT,
-    pCallbackData: ^mut VkDebugUtilsMessengerCallbackDataEXT,
-    pUserData: ^mut void) -> VkBool32 #stdcall {
-
-    if i32(messageSeverity) >= i32(VkDebugUtilsMessageSeverityFlagBitsEXT.WarningBitExt) {
-        level := match messageSeverity {
-            .VerboseBitExt  -> "Verbose"
-            .InfoBitExt     -> "Info"
-            .WarningBitExt  -> "Warning"
-            .ErrorBitExt    -> "Error"
-            _               -> "?"
-        }
-
-        io.formatln("[Vulkan {}] {}", [level, string.from_cstring(pCallbackData.pMessage)])
-    }
-
-    return VK_FALSE
-}
 
 Main :: () {
     args := clap.get_cmd_args()
@@ -75,379 +48,15 @@ Main :: () {
     }
 }
 
-VulkanContext :: struct {
-    instance        : vk.Instance
-    debug_messenger : vk.DebugUtilsMessenger
-    surface         : vk.Surface
-    physical_device : vk.PhysicalDevice
-    device          : vk.Device
-    graphics_queue  : vk.Queue
-    present_queue   : vk.Queue
-    graphics_queue_family : u32
-    present_queue_family  : u32
-}
-
-impl VulkanContext {
-    destroy :: (&Self) {
-        self.device.destroy()
-        self.surface.destroy()
-        self.debug_messenger.destroy()
-        self.instance.destroy()
-    }
-}
-
-impl Drop for VulkanContext {
-    drop :: (&Self) {
-        self.destroy()
-    }
-}
-
-impl VulkanContext {
-    new :: (window: ^GLFWwindow) -> Result[^mut VulkanContext, vk.Error] {
-        validation_info := vk.ValidationInfo(
-            message_severity = .VerboseBitExt or .InfoBitExt or .WarningBitExt or .ErrorBitExt
-            message_type     = .GeneralBitExt or .ValidationBitExt or .PerformanceBitExt
-            user_callback    = vulkan_debug_callback
-            user_data        = null
-        )
-
-
-        device_extensions := [string.from_cstring(VK_KHR_SWAPCHAIN_EXTENSION_NAME)]
-
-        extensions := Array[string].new()
-
-        // add extensions for glfw
-        mut glfw_extensions : []^char8 = default
-        glfw_extensions.data = glfwGetRequiredInstanceExtensions(cast ^mut glfw_extensions.length)
-        for glfw_ext in glfw_extensions {
-            extensions.add(string.from_cstring(glfw_ext))
-        }
-
-        instance := try(vk.Instance.new(
-            api_version = Some(vk.Version((1, 2, 0)))
-            validation  = Some(validation_info)
-            extensions = extensions[..]
-        ))
-
-        debug_messenger := try(instance.create_debug_messenger(validation_info))
-        surface := try(instance.create_surface_glfw(window))
-
-        // find suitable physical device
-        physical_devices := try(instance.enumerate_physical_devices())
-
-        suitable_physical_devices := vk.PhysicalDevice.filter_by_requirements(physical_devices[..],
-            extensions = device_extensions
-            queues     = [vk.QueueFlags.GraphicsBit or .TransferBit]
-            present    = Some(&surface)
-            swapchain  = Some(&surface)
-        )
-
-        if suitable_physical_devices.count() == 0 {
-            return Err(vk.Error.NoPhysicalDevice)
-        }
-
-        physical_device := *suitable_physical_devices[0]
-        graphics_families := physical_device.get_queue_families_with(.GraphicsBit or .TransferBit)
-        present_families := physical_device.get_queue_families_with_present(&surface)
-
-        graphics_family := *graphics_families[0]
-        present_family := *present_families[0]
-
-        // create device
-        unique_queue_families := Map[u32, ()].new()
-        unique_queue_families.set(graphics_family, ())
-        unique_queue_families.set(present_family, ())
-
-        queue_create_infos := Array[vk.DeviceQueueCreateInfo].new(unique_queue_families.count())
-        for kv in &unique_queue_families {
-            queue_create_infos.add(vk.DeviceQueueCreateInfo(
-                family      = *kv.key
-                priorities  = [1.0]
-            ))
-        }
-
-        features12 := VkPhysicalDeviceVulkan12Features(
-            sType = .PhysicalDeviceVulkan12Features
-            hostQueryReset = 1
-        )
-
-        features := VkPhysicalDeviceFeatures2(
-            sType = .PhysicalDeviceFeatures2
-            pNext = ^features12
-            features = VkPhysicalDeviceFeatures()
-        )
-        device := try(vk.Device.new(physical_device,
-            extensions = device_extensions
-            queues = queue_create_infos[..]
-            features = ^features))
-        graphics_queue := device.get_queue(graphics_family)
-        present_queue := device.get_queue(present_family)
-
-        result := mem.alloc(VulkanContext)
-        *result = VulkanContext(
-            instance        = instance
-            debug_messenger = debug_messenger
-            surface         = surface
-            physical_device = *physical_device
-            device          = device
-            graphics_queue  = graphics_queue
-            present_queue   = present_queue
-            graphics_queue_family = graphics_family
-            present_queue_family  = present_family
-        )
-        return Ok(result)
-    }
-}
-
-FrameData :: struct {
-    command_buffer  : VkCommandBuffer = default
-    sema_acquire    : VkSemaphore = default
-    sema_render     : VkSemaphore = default
-    fence_draw_done : VkFence = default
-    query_pool      : VkQueryPool = default
-    query_results   : [2]u64 = default
-}
-
-FrameStatistics :: struct {
-    avg_speed   := 0.02
-    total_time  := 0.0
-    cpu_time    := 0.0
-    wait_time   := 0.0
-    gpu_time    := 0.0
-}
-
-HelloTriangleApplication :: struct {
-    // window stuff
-    window                  : ^mut GLFWwindow = null
-    window_size             : (x: i32, y: i32) = 800, 600
-
-    current_frame           := 0
-    framebuffer_resized     := false
-
-    // vulkan stuff
-    context                 : ^VulkanContext = null
-    imgui_context           : ^imgui.ImGuiContext = null
-
-    surface_capabilities    := Option[vk.PhysicalDeviceSurfaceCapabilities].None
-    swapchain_format        : VkSurfaceFormatKHR = default
-    swapchain               := Rc[vk.Swapchain].empty()
-
-    render_pass             : VkRenderPass = null
-    pipeline_layout         : VkPipelineLayout = null
-    graphics_pipeline       : VkPipeline = null
-    pipeline_cache          : VkPipelineCache = null
-    descriptor_pool         : VkDescriptorPool = null
-    command_pool            : VkCommandPool = null
-
-    frames                  := Array[FrameData].new()
-    frame_statistics        := FrameStatistics()
-
-    clear_color             : [4]f32 = [0.1, 0.1, 0.1, 1.0]
-    show_demo_window        := false
-
-    mesh_file               := String.with_capacity(256)
-    mesh                    := Rc[ObjMesh].empty()
-    mesh_vertex_buffer      := vk.Buffer()
-    mesh_index_buffer       := vk.Buffer()
-}
-
-impl HelloTriangleApplication {
-    new :: () -> HelloTriangleApplication {
-        return HelloTriangleApplication()
-    }
-
-
-    run :: (&mut Self, args: []String) -> Result[(), String] {
-        defer self.cleanup()
-
-        // init stuff
-        try(self.init_window())
-        try(self.init_vulkan())
-
-        try(self.on_init(args))
-
-
-        // imgui setup
-        try(self.init_imgui(window))
-
-        // (self.query_result_buffer, self.query_result_buffer_mem) = try(self.create_buffer(100 * @sizeof(u64)))
-        // vk_try(vkMapMemory(self.context.device.handle, self.query_result_buffer_mem, 0, 100 * @sizeof(u64), .None, cast ^mut self.query_result_buffer_ptr.data))
-        // self.query_result_buffer_ptr.length = 100
-
-        self.main_loop()
-
-        return Ok()
-    }
-    
-    cleanup_swapchain :: (&mut Self) {
-        for(by_ref=false) framebuffer in self.swapchain.get().get_framebuffers() {
-            if framebuffer != null then vkDestroyFramebuffer(self.context.device.handle, framebuffer, null)
-        }
-
-        for(by_ref=false) view in self.swapchain.get().get_image_views() {
-            if view != null then vkDestroyImageView(self.context.device.handle, view, null)
-        }
-
-        swapchain.get().destroy()
-    }
-
-    cleanup :: (&mut Self) {
-        io.formatln("cleanup()")
-
-        // imgui
-        vkDeviceWaitIdle(self.context.device.handle)
-
-        if self.imgui_context != null {
-            ImGui_ImplVulkan_Shutdown()
-            ImGui_ImplGlfw_Shutdown()
-            imgui.DestroyContext(null)
-        }
-
-
-        self.mesh_vertex_buffer.destroy(self.context.device.handle)
-        self.mesh_index_buffer.destroy(self.context.device.handle)
-
-        for(by_ref=true) frame in self.frames[..] {
-            vkDestroyFence(self.context.device.handle, frame.fence_draw_done, null)
-            vkDestroySemaphore(self.context.device.handle, frame.sema_acquire, null)
-            vkDestroySemaphore(self.context.device.handle, frame.sema_render, null)
-            vkDestroyQueryPool(self.context.device.handle, frame.query_pool, null)
-        }
-
-        if descriptor_pool != null then vkDestroyDescriptorPool(self.context.device.handle, descriptor_pool, null)
-        if pipeline_cache  != null then vkDestroyPipelineCache(self.context.device.handle, pipeline_cache, null)
-
-        if graphics_pipeline != null then vkDestroyPipeline(self.context.device.handle, graphics_pipeline, null)
-        if pipeline_layout   != null then vkDestroyPipelineLayout(self.context.device.handle, pipeline_layout, null)
-
-        self.cleanup_swapchain()
-        if render_pass != null then vkDestroyRenderPass(self.context.device.handle, render_pass, null)
-        if command_pool != null then vkDestroyCommandPool(self.context.device.handle, command_pool, null)
-
-        self.context.destroy()
-        mem.free(self.context)
-
-        // glfw
-        if window != null then glfwDestroyWindow(window)
-        glfwTerminate()
-    }
-
-    main_loop :: (&mut Self) {
-        glfwShowWindow(window)
-
-        while glfwWindowShouldClose(window) == 0 {
-            cpu_start := glfwGetTime()
-            glfwPollEvents()
-
-            // render
-            draw_frame()
-
-            // 
-            cpu_end := glfwGetTime()
-            frame := self.frames[(self.current_frame + self.frames.count() - 1) % self.frames.count()]
-            timestamp_period := f64(self.context.physical_device.properties.limits.timestampPeriod)
-            self.frame_statistics.cpu_time = self.frame_statistics.avg_speed * (cpu_end - cpu_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.cpu_time
-        }
-
-        vkDeviceWaitIdle(self.context.device.handle)
-    }
-
-    draw_frame :: (&mut Self) {
-        // imgui
-        {
-            ImGui_ImplVulkan_NewFrame()
-            ImGui_ImplGlfw_NewFrame()
-            imgui.NewFrame()
-            self.on_imgui()
-            imgui.Render()
-        }
-
-        defer { self.current_frame = (self.current_frame + 1) % self.frames.count() }
-        frame : &mut FrameData = self.frames[self.current_frame]
-
-        // acquire image
-        image_index := self.prepare_frame(frame)
-
-        // wait for previous frame to be finished
-        wait_start := glfwGetTime()
-        vk_assert(vkWaitForFences(self.context.device.handle, 1, ^frame.fence_draw_done, VK_TRUE, u64.max))
-        wait_end := glfwGetTime()
-        self.frame_statistics.wait_time = self.frame_statistics.avg_speed * (wait_end - wait_start) * 1000.0 + (1 - self.frame_statistics.avg_speed) * self.frame_statistics.wait_time
-
-        // get queries from old frame
-        vkGetQueryPoolResults(self.context.device.handle, frame.query_pool, 0, cast frame.query_results.length, @sizeof(@typeof(frame.query_results)), cast frame.query_results.data, @sizeof(u64), ._64Bit)
-
-        // render frame
-        swapchain := self.swapchain.get()
-        self.on_render(frame, *swapchain.get_framebuffers()[int(image_index)], *swapchain.get_images()[int(image_index)], swapchain.get_depth_images()[int(image_index)].handle)
-
-        // render imgui viewports
-        imgui_io := imgui.GetIO()
-        if imgui.ImGuiConfigFlags.ViewportsEnable is in imgui_io.ConfigFlags {
-            imgui.UpdatePlatformWindows()
-            imgui.RenderPlatformWindowsDefault(null, null)
-        }
-
-        // present image
-        self.present(image_index, frame)
-    }
-
-    /// acquires next image from swapchain and recreates swapchain if necessary
-    prepare_frame :: (&mut Self, frame: &FrameData) -> u32 {
-        image_index : u32 = default
-        loop match vkAcquireNextImageKHR(self.context.device.handle, self.swapchain.get().handle, u64.max, frame.sema_acquire, null, ^image_index) {
-            .Success -> { return image_index }
-            .SuboptimalKhr -> { return image_index }
-
-            .ErrorOutOfDateKhr -> {
-                self.recreate_swapchains()
-            }
-
-            $err -> {
-                io.formatln("[Vulkan Error] vkAcquireNextImageKHR returned {}", [err])
-                @assert(false)
-            }
-        }
-        @assert(false)
-        return 0
-    }
-
-    /// present the rendered data in the graphics queue to the swapchain image
-    present :: (&mut Self, image_index: u32, frame: &FrameData) {
-        sema_render := [frame.sema_render]
-        swapchains := [self.swapchain.get().handle]
-        present_info := VkPresentInfoKHR(
-            sType              = .PresentInfoKhr
-            waitSemaphoreCount = cast sema_render.length
-            pWaitSemaphores    = sema_render.data
-            swapchainCount     = cast swapchains.length
-            pSwapchains        = swapchains.data
-            pImageIndices      = ^image_index
-            pResults           = null
-        )
-        match vkQueuePresentKHR(self.context.present_queue.handle, ^present_info) {
-            .Success -> {}
-            .SuboptimalKhr -> {}
-
-            .ErrorOutOfDateKhr -> {
-                self.recreate_swapchains()
-                return
-            }
-
-            $err -> {
-                io.formatln("[Vulkan Error] vkQueuePresentKHR returned {}", [err])
-                @assert(false)
-            }
-        }
-
-        if self.framebuffer_resized {
-            self.recreate_swapchains()
-        }
-    }
-}
-
 impl HelloTriangleApplication {
     on_init :: (&mut Self, args: []String) -> Result[(), String] {
+        shaders := [
+            try(vk.Shader.new(&self.context.device, "triangle.vert.spv"))
+            try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
+        ]
+        defer { for(by_ref=true) shader in shaders[..] do shader.destroy(self.context.device.handle) }
+        self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..], ObjMesh.Vertex))
+
         for i in 0 .. MaxFramesInFlight {
             semaphore_info := VkSemaphoreCreateInfo(
                 sType = .SemaphoreCreateInfo
@@ -480,6 +89,19 @@ impl HelloTriangleApplication {
             )
             vk_try(vkCreateQueryPool(self.context.device.handle, ^query_pool_info, null, ^mut frame.query_pool))
 
+            frame.draw_data_buffer = Rc[vk.Buffer].new(try(vk.Buffer.new(&self.context.device, [VK_QUEUE_FAMILY_IGNORED], @sizeof(DrawData), .TransferDstBit or .StorageBufferBit)))
+            vk_try(vkMapMemory(self.context.device.handle, frame.draw_data_buffer.get().memory, 0, @sizeof(DrawData), .None, cast ^mut frame.draw_data))
+            *frame.draw_data = DrawData()
+
+            descriptor_set_layouts := [self.graphics_pipeline.descriptor_set_layout]
+            descriptor_alloc_info := VkDescriptorSetAllocateInfo(
+                sType               = .DescriptorSetAllocateInfo
+                descriptorPool      = self.descriptor_pool
+                descriptorSetCount  = cast descriptor_set_layouts.length
+                pSetLayouts         = descriptor_set_layouts.data
+            )
+            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, ^mut frame.descriptor_set))
+
             self.frames.add(frame)
         }
 
@@ -497,29 +119,12 @@ impl HelloTriangleApplication {
     }
 
     load_mesh :: (&mut Self, mesh_file: string) -> Result[(), String] {
-        mesh_ref := Rc[ObjMesh].new(try_with(ObjMesh.from_file(mesh_file), { return Err(fmt.format("Failed to load model '{}': {}", [mesh_file, err])) }))
-        mesh := mesh_ref.get()
-
-        vertex_buffer := try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .VertexBufferBit))
-        index_buffer := try(vk.Buffer.new(&self.context.device, [self.context.graphics_queue_family], cast mesh.triangles.count() * @sizeof(u32), .IndexBufferBit))
-
-        mut vertex_map : ^ObjMesh.Vertex = default
-        vk_try(vkMapMemory(self.context.device.handle, vertex_buffer.memory, 0, cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .None, cast ^mut vertex_map))
-        C.memcpy(vertex_map, mesh.vertices.get_raw(), cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex))
-
-        mut index_map : ^ObjMesh.Vertex = default
-        vk_try(vkMapMemory(self.context.device.handle, index_buffer.memory, 0, cast mesh.triangles.count() * @sizeof(u32), .None, cast ^mut index_map))
-        C.memcpy(index_map, mesh.triangles.get_raw(), cast mesh.triangles.count() * @sizeof(u32))
+        new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, mesh_file)))
 
         vkDeviceWaitIdle(self.context.device.handle)
 
-        self.mesh = mesh_ref
-
-        self.mesh_vertex_buffer.destroy(self.context.device.handle)
-        self.mesh_vertex_buffer = vertex_buffer
-
-        self.mesh_index_buffer.destroy(self.context.device.handle)
-        self.mesh_index_buffer = index_buffer
+        if !self.mesh.is_null() then self.mesh.get().destroy(&self.context.device)
+        self.mesh = new_mesh
 
         self.mesh_file.append_string(mesh_file)
         self.mesh_file.as_cstring()
@@ -529,7 +134,41 @@ impl HelloTriangleApplication {
     }
 
     on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage, depth: VkImage) {
+        extent := self.swapchain.get().extent
+        frame.draw_data.model = mat4.from_rotation_y(radians(90.0f) * f32(glfwGetTime()))
+        frame.draw_data.model = mat4.id()
+
+        if self.camera_perspective {
+            frame.draw_data.view = mat4.from_translation(vec3(0, 0, -self.camera_distance)) * mat4.from_rotation_x(radians(-self.camera_pitch)) * mat4.from_rotation_y(radians(-self.camera_yaw))
+            frame.draw_data.proj = mat4.perspective_reverse_z(0.001, radians(50.0f), f32(extent.width) / f32(extent.height), true)
+            // frame.draw_data.proj = mat4.perspective(0.001, 1000, radians(50.0f), f32(extent.width) / f32(extent.height), true)
+        } else {
+            frame.draw_data.view = mat4.from_rotation_x(radians(-self.camera_pitch)) * mat4.from_rotation_y(radians(-self.camera_yaw))
+            d := self.camera_distance
+            frame.draw_data.proj = mat4.orthographic(-d, d, d, -d, -4000, 1000)
+        }
+
+        buffer_infos := [
+            VkDescriptorBufferInfo(
+                buffer = frame.draw_data_buffer.get().handle
+                offset = 0
+                range = @sizeof(DrawData)
+            )
+        ]
+        write_descriptor_sets := [
+            VkWriteDescriptorSet(
+                sType = .WriteDescriptorSet
+                dstSet = frame.descriptor_set
+                dstBinding = 0
+                dstArrayElement = 0
+                descriptorCount = cast buffer_infos.length
+                descriptorType = .StorageBuffer
+                pBufferInfo = buffer_infos.data
+            )
+        ]
+        vkUpdateDescriptorSets(self.context.device.handle, cast write_descriptor_sets.length, write_descriptor_sets.data, 0, null)
         sema_render := [frame.sema_render]
+
         sema_acquire := [frame.sema_acquire]
 
         vkResetCommandBuffer(frame.command_buffer, .None)
@@ -591,8 +230,12 @@ impl HelloTriangleApplication {
             _pImageMemoryBarriers = image_barriers.data
         )
 
+
+        descriptor_sets := [frame.descriptor_set]
+        vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 0, cast descriptor_sets.length, cast descriptor_sets.data, 0, null)
+
         vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
-        vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline)
+        vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline.handle)
         
         viewport := VkViewport(
             x        = 0.0
@@ -612,11 +255,11 @@ impl HelloTriangleApplication {
         vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
 
         vertex_buffer_offset : VkDeviceSize = 0
-        vkCmdBindVertexBuffers(frame.command_buffer, 0, 1, ^self.mesh_vertex_buffer.handle, ^vertex_buffer_offset)
-        vkCmdBindIndexBuffer(frame.command_buffer, self.mesh_index_buffer.handle, 0, .Uint32)
+        vkCmdBindVertexBuffers(frame.command_buffer, 0, 1, ^self.mesh.get().vertex_buffer.handle, ^vertex_buffer_offset)
+        vkCmdBindIndexBuffer(frame.command_buffer, self.mesh.get().index_buffer.handle, 0, .Uint32)
         for 0..1 {
             // vkCmdDraw(frame.command_buffer, cast self.mesh.get().vertices.count(), 1, 0, 0)
-            vkCmdDrawIndexed(frame.command_buffer, cast self.mesh.get().triangles.count(), 1, 0, 0, 0)
+            vkCmdDrawIndexed(frame.command_buffer, cast self.mesh.get().index_count, 1, 0, 0, 0)
         }
 
         // render imgui stuff into command buffer
@@ -703,7 +346,11 @@ impl HelloTriangleApplication {
                 imgui.LabelText("wait", wait_time.as_cstring())
 
                 gpu_time := fmt.format("{:.2}ms", [self.frame_statistics.gpu_time])
-                imgui.LabelText("CPU", gpu_time.as_cstring())
+                imgui.LabelText("GPU", gpu_time.as_cstring())
+
+                imgui.Checkbox("Perspective", ^mut self.camera_perspective)
+                imgui.DragFloat("Camera sensitivity", ^mut self.mouse_sensitivity, 0.01f, 0.01, 1.5, "%.2f", .None)
+                imgui.DragFloat("Zoom sensitivity", ^mut self.scroll_speed, 0.01f, 0.01, 1, "%.2f", .None)
             }
 
             imgui.Separator()
@@ -720,11 +367,25 @@ impl HelloTriangleApplication {
                 match self.load_mesh(mesh_file) {
                     Ok(_) -> {}
                     Err($err) -> {
-                        io.formatln("Failed to load mesh '{}': {}", [mesh_file, err])
+                        io.formatln("{}", [err])
                     }
                 }
             }
+
+            if !imgui.IsWindowFocused(.AnyWindow) {
+                mouse_drag_delta := imgui.GetMouseDragDelta(.Left, 0.1)
+                imgui.ResetMouseDragDelta(.Left)
+
+                self.camera_pitch -= mouse_drag_delta.y * self.mouse_sensitivity
+                self.camera_yaw -= mouse_drag_delta.x * self.mouse_sensitivity
+            }
+
+            if !imgui.IsWindowHovered(.AnyWindow) {
+                self.camera_distance *= 1 - self.mouse_scroll.y * self.scroll_speed
+                self.camera_distance = clamp(self.camera_distance, 0.1, 100)
+            }
         }
+
     }
 
     create_dock_space :: (&mut Self) {
@@ -782,513 +443,9 @@ impl HelloTriangleApplication {
 
         imgui.End()
     }
-}
 
-// window stuff
-impl HelloTriangleApplication {
-    init_window :: (&mut Self) -> Result[(), String] {
-        glfwSetErrorCallback(glfw_error_callback)
-
-        if glfwInit() == 0 {
-            return Err(fmt.format("Failed to initialize GLFW"))
-        }
-
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE)
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API)
-
-        mut monitors: []mut ^mut GLFWmonitor = []
-        monitors.data = glfwGetMonitors(cast ^mut monitors.length)
-
-        @assert(monitors.length > 0)
-
-        window = glfwCreateWindow(self.window_size.x, self.window_size.y, "Vulkan Test", null, null)
-        if window == null {
-            return Err(fmt.format("Failed to create window"))
-        }
-
-        // center window on monitor
-        monitor := *monitors[0]
-        vidmode := glfwGetVideoMode(monitor)
-        monitor_pos : (x: i32, y: i32) = default
-        glfwGetMonitorPos(monitor, ^monitor_pos.x, ^monitor_pos.y)
-        glfwSetWindowPos(window, monitor_pos.x + vidmode.width / 2 - self.window_size.x / 2, monitor_pos.y + vidmode.height / 2 - self.window_size.y / 2)
-
-        glfwSetWindowUserPointer(window, ^mut *self)
-
-        glfwSetWindowSizeCallback(window, (window, width, height) => {
-            app := cast(^mut HelloTriangleApplication) glfwGetWindowUserPointer(window)
-            app.framebuffer_resized = true
-        })
-
-        return Ok()
-    }
-}
-
-// vulkan stuff
-impl HelloTriangleApplication {
-    init_vulkan :: (&mut Self) -> Result[(), String] {
-        self.context = try_with(VulkanContext.new(self.window), { return Err(fmt.format("Failed to create context: {}", [err])) })
-        self.surface_capabilities = Some(self.context.physical_device.query_swapchain_support(&self.context.surface))
-        self.swapchain_format = self.surface_capabilities.unwrap_ref().choose_swap_surface_format(.R8g8b8a8Srgb, .SrgbNonlinearKhr)
-
-        try(self.create_command_pool())
-        
-        mut window_extent := VkExtent2D()
-        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
-
-        self.swapchain = try_with(vk.Swapchain.new(
-            device                  = &self.context.device
-            physical_device         = &self.context.physical_device
-            surface                 = &self.context.surface
-            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
-            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
-            image_format            = self.swapchain_format.format
-            color_space             = self.swapchain_format.colorSpace
-            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
-            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
-            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
-        ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
-
-        try(self.create_render_pass())
-        try(self.create_graphics_pipeline())
-
-        try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_depth_images(&self.context.device), { return Err(fmt.format("Failed to create swapchain depth images: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_depth_image_views(), { return Err(fmt.format("Failed to create swapchain depth image views: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
-
-        //
-        pool_sizes := [
-            VkDescriptorPoolSize(.Sampler, 1000)
-            VkDescriptorPoolSize(.CombinedImageSampler, 1000)
-            VkDescriptorPoolSize(.SampledImage, 1000)
-            VkDescriptorPoolSize(.StorageImage, 1000)
-            VkDescriptorPoolSize(.UniformTexelBuffer, 1000)
-            VkDescriptorPoolSize(.StorageTexelBuffer, 1000)
-            VkDescriptorPoolSize(.UniformBuffer, 1000)
-            VkDescriptorPoolSize(.StorageBuffer, 1000)
-            VkDescriptorPoolSize(.UniformBufferDynamic, 1000)
-            VkDescriptorPoolSize(.StorageBufferDynamic, 1000)
-            VkDescriptorPoolSize(.InputAttachment, 1000)
-        ]
-        descriptor_pool_info := VkDescriptorPoolCreateInfo(
-            sType           = .DescriptorPoolCreateInfo
-            flags           = .FreeDescriptorSetBit or .UpdateAfterBindBit
-            maxSets         = cast 1000 * pool_sizes.length
-            poolSizeCount   = cast pool_sizes.length
-            pPoolSizes      = pool_sizes.data
-        )
-        vk_try(vkCreateDescriptorPool(self.context.device.handle, ^descriptor_pool_info, null, ^mut self.descriptor_pool))
-
-        return Ok()
-    }
-
-    init_imgui :: (&mut Self, window: ^GLFWwindow) -> Result[(), String] {
-        self.imgui_context = imgui.CreateContext(null)
-
-        if imgui_context == null {
-            return Err(fmt.format("imgui.CreateContext failed"))
-        }
-
-        imgui_io := imgui.GetIO()
-        imgui_io.ConfigFlags = imgui_io.ConfigFlags or .DockingEnable or .ViewportsEnable
-
-        imgui.StyleColorsDark(null)
-
-        // change corners so they are right angles instead of rounded
-        style := imgui.GetStyle()
-        style.WindowRounding = 0.0
-
-        //
-        if !ImGui_ImplGlfw_InitForVulkan(cast window, false) {
-            return Err(fmt.format("ImGui.ImGui_ImplGlfw_InitForVulkan failed"))
-        }
-
-        init_info := ImGui_ImplVulkan_InitInfo(
-            Instance        = self.context.instance.handle
-            PhysicalDevice  = self.context.physical_device.handle
-            Device          = self.context.device.handle
-            QueueFamily     = cast self.context.graphics_queue_family
-            Queue           = self.context.graphics_queue.handle
-            PipelineCache   = self.pipeline_cache
-            DescriptorPool  = self.descriptor_pool
-            MinImageCount   = cast self.surface_capabilities.unwrap_ref().capabilities.minImageCount
-            ImageCount      = cast self.surface_capabilities.unwrap_ref().capabilities.minImageCount
-            MSAASamples     = ._1Bit
-            Allocator       = null
-            CheckVkResultFn = (err) => {
-                if err != 0 {
-                    io.formatln("[ImGui] error: {}", [err])
-                }
-            }
-        )
-
-        if !ImGui_ImplVulkan_Init(^init_info, self.render_pass) {
-            return Err(fmt.format("ImGui.ImGui_ImplVulkan_Init failed"))
-        }
-
-        {
-            // Use any command queue
-            command_pool := self.command_pool
-            command_buffer := self.frames[0].command_buffer
-
-            vk_try(vkResetCommandPool(self.context.device.handle, command_pool, .None))
-            begin_info := VkCommandBufferBeginInfo(
-                sType = .CommandBufferBeginInfo
-                flags = .OneTimeSubmitBit
-            )
-            vk_try(vkBeginCommandBuffer(command_buffer, ^begin_info))
-
-            ImGui_ImplVulkan_CreateFontsTexture(command_buffer)
-
-            end_info := VkSubmitInfo(
-                sType = .SubmitInfo
-                commandBufferCount = 1
-                pCommandBuffers = ^command_buffer
-            )
-            vk_try(vkEndCommandBuffer(command_buffer))
-            vk_try(vkQueueSubmit(self.context.graphics_queue.handle, 1, ^end_info, null))
-            vk_try(vkDeviceWaitIdle(self.context.device.handle))
-            ImGui_ImplVulkan_DestroyFontUploadObjects()
-        }
-
-        return Ok()
-    }
-
-    recreate_swapchains :: (&mut Self) -> Result[(), String] {
-        self.framebuffer_resized = false
-
-        mut window_extent := VkExtent2D()
-        glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
-        while window_extent.width == 0 or window_extent.height == 0 {
-            glfwGetFramebufferSize(self.window, cast ^mut window_extent.width, cast ^mut window_extent.height)
-            glfwWaitEvents()
-        }
-
-        vkDeviceWaitIdle(self.context.device.handle)
-        self.cleanup_swapchain()
-        self.surface_capabilities.unwrap_ref_mut().update_capabilities(&self.context.surface)
-
-        // create new swapchain
-        self.swapchain = try_with(vk.Swapchain.new(
-            device                  = &self.context.device
-            physical_device         = &self.context.physical_device
-            surface                 = &self.context.surface
-            queue_family_indices    = [self.context.graphics_queue_family, self.context.present_queue_family]
-            extent                  = self.surface_capabilities.unwrap_ref().choose_swap_extent(window_extent)
-            image_format            = self.swapchain_format.format
-            color_space             = self.swapchain_format.colorSpace
-            present_mode            = self.surface_capabilities.unwrap_ref().choose_swap_present_mode(.MailboxKhr)
-            image_count             = self.surface_capabilities.unwrap_ref().choose_image_count()
-            pre_transform           = self.surface_capabilities.unwrap_ref().capabilities.currentTransform
-        ), { return Err(fmt.format("Failed to create swapchain: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_image_views(), { return Err(fmt.format("Failed to create swapchain image views: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_depth_images(&self.context.device), { return Err(fmt.format("Failed to create swapchain depth images: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_depth_image_views(), { return Err(fmt.format("Failed to create swapchain depth image views: {}", [err])) })
-        try_with(self.swapchain.get_mut().create_framebuffers(self.render_pass), { return Err(fmt.format("Failed to create swapchain framebuffers: {}", [err])) })
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating render pass
-    //////////////////////////////////////////
-
-    create_render_pass :: (&mut Self) -> Result[(), String] {
-        attachments := [
-            VkAttachmentDescription(
-                format         = self.swapchain.get().image_format
-                samples        = ._1Bit
-                loadOp         = .Clear
-                storeOp        = .Store
-                stencilLoadOp  = .DontCare
-                stencilStoreOp = .DontCare
-                initialLayout  = .Undefined
-                finalLayout    = .PresentSrcKhr
-            )
-            VkAttachmentDescription(
-                format         = .D32Sfloat
-                samples        = ._1Bit
-                loadOp         = .Clear
-                storeOp        = .DontCare
-                stencilLoadOp  = .DontCare
-                stencilStoreOp = .DontCare
-                initialLayout  = .DepthStencilAttachmentOptimal
-                finalLayout    = .DepthStencilAttachmentOptimal
-            )
-        ]
-
-        color_attachment_ref := VkAttachmentReference(
-            attachment = 0
-            layout     = .ColorAttachmentOptimal
-        )
-
-        depth_stencil_attachment_ref := VkAttachmentReference(
-            attachment  = 1
-            layout      = .DepthStencilAttachmentOptimal
-        )
-
-        subpasses := [
-            VkSubpassDescription(
-                pipelineBindPoint       = .Graphics
-                inputAttachmentCount    = 0
-                pInputAttachments       = null
-                colorAttachmentCount    = 1
-                pColorAttachments       = ^color_attachment_ref
-                pResolveAttachments     = null
-                pDepthStencilAttachment = ^depth_stencil_attachment_ref
-                preserveAttachmentCount = 0
-                pPreserveAttachments    = null
-            )
-        ]
-
-        dependencies := [
-            VkSubpassDependency(
-                srcSubpass      = VK_SUBPASS_EXTERNAL
-                dstSubpass      = 0
-                srcStageMask    = .ColorAttachmentOutputBit
-                dstStageMask    = .ColorAttachmentOutputBit
-                srcAccessMask   = .None
-                dstAccessMask   = .ColorAttachmentWriteBit
-                dependencyFlags = .None
-            )
-            VkSubpassDependency(
-                srcSubpass      = 0
-                dstSubpass      = 0
-                srcStageMask    = .ColorAttachmentOutputBit
-                dstStageMask    = .ColorAttachmentOutputBit
-                srcAccessMask   = .ColorAttachmentWriteBit
-                dstAccessMask   = .ColorAttachmentWriteBit
-                dependencyFlags = .ByRegionBit
-            )
-        ]
-
-        render_pass_info := VkRenderPassCreateInfo(
-            sType           = .RenderPassCreateInfo
-            attachmentCount = cast attachments.length
-            pAttachments    = attachments.data
-            subpassCount    = cast subpasses.length
-            pSubpasses      = subpasses.data
-            dependencyCount = cast dependencies.length
-            pDependencies   = dependencies.data
-        )
-
-        vk_try(vkCreateRenderPass(self.context.device.handle, ^render_pass_info, null, ^mut self.render_pass))
-
-        return Ok()
-    }
-
-    //////////////////////////////////////////
-    // stuff for creating pipeline
-    //////////////////////////////////////////
-
-    create_shader_module :: (&mut Self, code: []u8) -> Result[VkShaderModule, String] {
-        create_info := VkShaderModuleCreateInfo(
-            sType    = .ShaderModuleCreateInfo
-            codeSize = cast code.length
-            pCode    = cast(^mut u32) code.data
-        )
-
-        mut shader_module : VkShaderModule = default
-        vk_try(vkCreateShaderModule(self.context.device.handle, ^create_info, null, ^mut shader_module))
-
-        return Ok(shader_module)
-    }
-
-    create_graphics_pipeline :: (&mut Self) -> Result[(), String] {
-        vert_shader_code := try_with(fs.read_file_binary("triangle.vert.spv"), { return Err(fmt.format("Failed to load vertex shader: {}", [err])) })
-        frag_shader_code := try_with(fs.read_file_binary("triangle.frag.spv"), { return Err(fmt.format("Failed to load fragment shader: {}", [err])) })
-
-        vert_shader_module := try(self.create_shader_module(vert_shader_code.slice()))
-        defer vkDestroyShaderModule(self.context.device.handle, vert_shader_module, null)
-
-        frag_shader_module := try(self.create_shader_module(frag_shader_code.slice()))
-        defer vkDestroyShaderModule(self.context.device.handle, frag_shader_module, null)
-
-        vert_shader_stage_info := VkPipelineShaderStageCreateInfo(
-            sType               = .PipelineShaderStageCreateInfo
-            stage               = .VertexBit
-            module              = vert_shader_module
-            pName               = "main"c
-        )
-
-        frag_shader_stage_info := VkPipelineShaderStageCreateInfo(
-            sType               = .PipelineShaderStageCreateInfo
-            stage               = .FragmentBit
-            module              = frag_shader_module
-            pName               = "main"c
-        )
-
-        shader_stages := [vert_shader_stage_info, frag_shader_stage_info]
-
-        vertex_bindings := [
-            VkVertexInputBindingDescription(
-                binding = 0
-                stride = @sizeof(ObjMesh.Vertex)
-                inputRate = .Vertex
-            )
-        ]
-        vertex_attribs := [
-            VkVertexInputAttributeDescription(
-                location = 0
-                binding = 0
-                format = .R32g32b32Sfloat
-                offset = cast @offsetof(ObjMesh.Vertex, "position")
-            )
-            VkVertexInputAttributeDescription(
-                location = 1
-                binding = 0
-                format = .R32g32Sfloat
-                offset = cast @offsetof(ObjMesh.Vertex, "tex_coord")
-            )
-            VkVertexInputAttributeDescription(
-                location = 2
-                binding = 0
-                format = .R32g32b32Sfloat
-                offset = cast @offsetof(ObjMesh.Vertex, "normal")
-            )
-        ]
-        vertex_input_info := VkPipelineVertexInputStateCreateInfo(
-            sType                           = .PipelineVertexInputStateCreateInfo
-            vertexBindingDescriptionCount   = cast vertex_bindings.length
-            pVertexBindingDescriptions      = vertex_bindings.data
-            vertexAttributeDescriptionCount = cast vertex_attribs.length
-            pVertexAttributeDescriptions    = vertex_attribs.data
-        )
-
-        input_assembly := VkPipelineInputAssemblyStateCreateInfo(
-            sType                  = .PipelineInputAssemblyStateCreateInfo
-            topology               = .TriangleList
-            primitiveRestartEnable = VK_FALSE
-        )
-
-        viewport_state := VkPipelineViewportStateCreateInfo(
-            sType         = .PipelineViewportStateCreateInfo
-            viewportCount = 1
-            pViewports    = null
-            scissorCount  = 1
-            pScissors     = null
-        )
-
-        rasterizer := VkPipelineRasterizationStateCreateInfo(
-            sType                   = .PipelineRasterizationStateCreateInfo
-            depthClampEnable        = VK_FALSE
-            rasterizerDiscardEnable = VK_FALSE
-            polygonMode             = .Fill
-            cullMode                = .BackBit
-            frontFace               = .CounterClockwise
-            depthBiasEnable         = VK_FALSE
-            depthBiasConstantFactor = 0.0
-            depthBiasClamp          = 0.0
-            depthBiasSlopeFactor    = 0.0
-            lineWidth               = 1.0
-        )
-
-        multisampling := VkPipelineMultisampleStateCreateInfo(
-            sType                 = .PipelineMultisampleStateCreateInfo
-            rasterizationSamples  = ._1Bit
-            sampleShadingEnable   = VK_FALSE
-            minSampleShading      = 1.0
-            pSampleMask           = null
-            alphaToCoverageEnable = VK_FALSE
-            alphaToOneEnable      = VK_FALSE
-        )
-
-        color_blend_attachment := VkPipelineColorBlendAttachmentState(
-            blendEnable         = VK_FALSE
-            srcColorBlendFactor = .SrcAlpha
-            dstColorBlendFactor = .OneMinusSrcAlpha
-            colorBlendOp        = .Add
-            srcAlphaBlendFactor = .One
-            dstAlphaBlendFactor = .Zero
-            alphaBlendOp        = .Add
-            colorWriteMask      = .RBit or .GBit or .BBit or .ABit
-        )
-
-        color_blending := VkPipelineColorBlendStateCreateInfo(
-            sType           = .PipelineColorBlendStateCreateInfo
-            logicOpEnable   = VK_FALSE
-            logicOp         = .Copy
-            attachmentCount = 1
-            pAttachments    = ^color_blend_attachment
-            blendConstants  = [0.0, 0.0, 0.0, 0.0]
-        )
-
-        depth_stencil := VkPipelineDepthStencilStateCreateInfo(
-            sType                   = .PipelineDepthStencilStateCreateInfo
-            depthTestEnable         = VK_TRUE
-            depthWriteEnable        = VK_TRUE
-            depthCompareOp          = .LessOrEqual
-            depthBoundsTestEnable   = VK_FALSE
-            stencilTestEnable       = VK_FALSE
-            minDepthBounds          = 0.0
-            maxDepthBounds          = 0.0
-        )
-
-        pipline_layout_info := VkPipelineLayoutCreateInfo(
-            sType                  = .PipelineLayoutCreateInfo
-            setLayoutCount         = 0
-            pSetLayouts            = null
-            pushConstantRangeCount = 0
-            pPushConstantRanges    = null
-        )
-
-        vk_try(vkCreatePipelineLayout(self.context.device.handle, ^pipline_layout_info, null, ^mut self.pipeline_layout))
-
-        mut dynamic_states : []VkDynamicState = [ VkDynamicState.Scissor, VkDynamicState.Viewport ]
-        dynamic_state := VkPipelineDynamicStateCreateInfo(
-            sType               = .PipelineDynamicStateCreateInfo
-            dynamicStateCount   = cast dynamic_states.length
-            pDynamicStates      = cast(^mut VkDynamicState) dynamic_states.data
-        )
-
-        pipeline_info := VkGraphicsPipelineCreateInfo(
-            sType               = .GraphicsPipelineCreateInfo
-            stageCount          = 2
-            pStages             = shader_stages.data
-            pVertexInputState   = ^vertex_input_info
-            pInputAssemblyState = ^input_assembly
-            pTessellationState  = null
-            pViewportState      = ^viewport_state
-            pRasterizationState = ^rasterizer
-            pMultisampleState   = ^multisampling
-            pDepthStencilState  = ^depth_stencil
-            pColorBlendState    = ^color_blending
-            pDynamicState       = ^dynamic_state
-            layout              = self.pipeline_layout
-            renderPass          = self.render_pass
-            subpass             = 0
-            basePipelineHandle  = null
-            basePipelineIndex   = -1
-        )
-
-        pipeline_cache_info := VkPipelineCacheCreateInfo(
-            sType = .PipelineCacheCreateInfo
-            flags = .None
-            initialDataSize = 0
-            pInitialData = null
-        )
-        vk_try(vkCreatePipelineCache(self.context.device.handle, ^pipeline_cache_info, null, ^mut self.pipeline_cache))
-
-        vk_try(vkCreateGraphicsPipelines(self.context.device.handle, self.pipeline_cache, 1, ^pipeline_info, null, ^mut self.graphics_pipeline))
-
-        return Ok()
-    }
-    
-    //////////////////////////////////////////
-    // stuff for creating command pool
-    //////////////////////////////////////////
-
-    create_command_pool :: (&mut Self) -> Result[(), String] {
-        pool_info := VkCommandPoolCreateInfo(
-            sType            = .CommandPoolCreateInfo
-            flags            = .ResetCommandBufferBit
-            queueFamilyIndex = self.context.graphics_queue_family
-        )
-
-        vk_try(vkCreateCommandPool(self.context.device.handle, ^pool_info, null, ^mut self.command_pool))
-
-        return Ok()
+    on_cleanup :: (&mut Self) {
+        io.formatln("cleanup()")
+        self.graphics_pipeline.destroy()
     }
 }

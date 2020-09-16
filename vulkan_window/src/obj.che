@@ -144,13 +144,6 @@ impl ObjMesh {
 
         }
 
-        io.formatln("mesh: {}
-positions: {}
-normals: {}
-tex_coords: {}
-triangles: {}
-vertices: {}", [name.slice(), positions.count(), normals.count(), tex_coords.count(), triangles.count(), vertices.count()])
-
         return Ok(ObjMesh(name, vertices, triangles))
     }
 }

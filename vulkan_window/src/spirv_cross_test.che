@@ -1,0 +1,75 @@
+use import std.string
+use import std.array
+use import std.printable
+fs :: import std.io.fs
+io :: import std.io
+fmt :: import std.fmt
+
+use import spirv_cross
+
+impl Printable for ^char8 {
+    print :: (&Self, buffer: &mut String, format: string) {
+        buffer.append_cstring(*self)
+    }
+}
+
+Main :: () {
+    match main() {
+        Ok(_) -> {}
+        Err($err) -> {
+            io.formatln("Error: {}", [err])
+        }
+    }
+}
+
+main :: () -> Result[(), String] {
+    path := "triangle.vert.spv"
+    shader_code := try(fs.read_file_binary(path))
+    mut code := shader_code.slice().reinterpret_cast(u32)
+
+    mut context : spvc_context = default
+    spvc_try(spvc_context_create(^mut context))
+    defer spvc_context_destroy(context)
+
+
+    mut ir : spvc_parsed_ir = default
+    spvc_try(spvc_context_parse_spirv(context, cast code.data, cast code.length, ^mut ir))
+
+    compiler : spvc_compiler = default
+    spvc_try(spvc_context_create_compiler(context, .Glsl, ir, .Copy, ^mut compiler))
+
+    execution_model := spvc_compiler_get_execution_model(compiler)
+    io.formatln("Execution model: {}", [execution_model])
+
+    // get entry points
+    mut entry_points : []spvc_entry_point = default
+    spvc_compiler_get_entry_points(compiler, cast ^entry_points.data, cast ^mut entry_points.length)
+
+    io.formatln("entry points: {}", [entry_points.length])
+    for(by_ref=true) entry_point in entry_points {
+        io.formatln("    [{}] {}", [it_index, *entry_point])
+    }
+    
+    // get vertex inputs
+    // e.g. layout(location = 0) in vec3 position;
+    mut resources : spvc_resources = default
+    spvc_try(spvc_compiler_create_shader_resources(compiler, ^mut resources))
+
+    mut stage_inputs : []spvc_reflected_resource = default
+    spvc_try(spvc_resources_get_resource_list_for_type(resources, .StageInput, cast ^stage_inputs.data, cast ^stage_inputs.length))
+
+    io.formatln("stage_inputs: {}", [stage_inputs.length])
+    for(by_ref=true) input in stage_inputs {
+        location := spvc_compiler_get_decoration(compiler, input.id, .Location)
+        io.formatln("    [{}] layout(location={}) {}", [it_index, location, *input])
+    }
+    return Ok()
+}
+
+spvc_try :: (code: Code) #macro {
+    result := @insert(code)
+    if result != .Success {
+        message := string.from_cstring(spvc_context_get_last_error_string(@link(context)))
+        return Err(fmt.format("{}:{}:{}: {} {}", [code.file, code.line, code.column, result, message]))
+    }
+}
