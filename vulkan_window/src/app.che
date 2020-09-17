@@ -562,7 +562,7 @@ impl HelloTriangleApplication {
         style.WindowRounding = 0.0
 
         //
-        if !ImGui_ImplGlfw_InitForVulkan(cast window, false) {
+        if !ImGui_ImplGlfw_InitForVulkan(cast window, true) {
             return Err(fmt.format("ImGui.ImGui_ImplGlfw_InitForVulkan failed"))
         }
 
