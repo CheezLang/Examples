@@ -255,6 +255,7 @@ HelloTriangleApplication :: struct {
     // mesh                    := Rc[Mesh].empty()
 
     meshes                  := Array[Rc[Mesh]].new()
+    current_mesh            : i32 = 0
 
     camera_pitch            := 0.0f
     camera_yaw              := 0.0f
