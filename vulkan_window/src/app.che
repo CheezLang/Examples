@@ -203,10 +203,9 @@ FrameData :: struct {
     query_pool      : VkQueryPool = default
     query_results   : [2]u64 = default
 
-    draw_data_buffer    := Rc[vk.Buffer].empty()
-    draw_data           : ^mut DrawData = null
+    draw_data_buffer        := Rc[vk.Buffer].empty()
+    draw_data               : ^mut DrawData = null
     frame_descriptor_set    : VkDescriptorSet = default
-    mesh_descriptor_set     : VkDescriptorSet = default
 }
 
 FrameStatistics :: struct {
@@ -253,7 +252,9 @@ HelloTriangleApplication :: struct {
     show_demo_window        := false
 
     mesh_file               := String.with_capacity(256)
-    mesh                    := Rc[Mesh].empty()
+    // mesh                    := Rc[Mesh].empty()
+
+    meshes                  := Array[Rc[Mesh]].new()
 
     camera_pitch            := 0.0f
     camera_yaw              := 0.0f
@@ -285,10 +286,6 @@ impl HelloTriangleApplication {
         // imgui setup
         try(self.init_imgui(window))
 
-        // (self.query_result_buffer, self.query_result_buffer_mem) = try(self.create_buffer(100 * @sizeof(u64)))
-        // vk_try(vkMapMemory(self.context.device.handle, self.query_result_buffer_mem, 0, 100 * @sizeof(u64), .None, cast ^mut self.query_result_buffer_ptr.data))
-        // self.query_result_buffer_ptr.length = 100
-
         self.main_loop()
 
         return Ok()
@@ -318,7 +315,9 @@ impl HelloTriangleApplication {
             imgui.DestroyContext(null)
         }
 
-        if !self.mesh.is_null() then self.mesh.get().destroy(&self.context.device)
+        for mesh in &mut self.meshes {
+            mesh.get().destroy(&self.context.device)
+        }
 
         for(by_ref=true) frame in self.frames[..] {
             vkDestroyFence(self.context.device.handle, frame.fence_draw_done, null)

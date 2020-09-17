@@ -15,11 +15,11 @@ Mesh :: struct {
     index_buffer    : vk.Buffer
     index_count     : u64
     vertex_buffer_size : u64
-    // descriptor_set  : VkDescriptorSet
+    descriptor_set  : VkDescriptorSet
 }
 
 impl Mesh {
-    from_file :: (device: &vk.Device, path: string) -> Result[Mesh, String] {
+    from_file :: (device: &vk.Device, set_layout: VkDescriptorSetLayout, descriptor_pool: VkDescriptorPool, path: string) -> Result[Mesh, String] {
         mesh := try_with(ObjMesh.from_file(path), { return Err(fmt.format("Failed to load model '{}': {}", [path, err])) })
 
         vertex_buffer := try_with(vk.Buffer.new(device, [VK_QUEUE_FAMILY_IGNORED], cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex), .StorageBufferBit), { return Err(fmt.format("{}", [err])) })
@@ -35,36 +35,36 @@ impl Mesh {
         C.memcpy(index_map, mesh.triangles.get_raw(), cast mesh.triangles.count() * @sizeof(u32))
         vkUnmapMemory(device.handle, index_buffer.memory)
 
-        // descriptor_set_layouts := [self.graphics_pipeline.descriptor_set_layout]
-        // descriptor_alloc_info := VkDescriptorSetAllocateInfo(
-        //     sType               = .DescriptorSetAllocateInfo
-        //     descriptorPool      = self.descriptor_pool
-        //     descriptorSetCount  = cast descriptor_set_layouts.length
-        //     pSetLayouts         = descriptor_set_layouts.data
-        // )
+        descriptor_set_layouts := [set_layout]
+        descriptor_alloc_info := VkDescriptorSetAllocateInfo(
+            sType               = .DescriptorSetAllocateInfo
+            descriptorPool      = descriptor_pool
+            descriptorSetCount  = cast descriptor_set_layouts.length
+            pSetLayouts         = descriptor_set_layouts.data
+        )
 
-        // mut descriptor_set : VkDescriptorSet = default
-        // vk_try(vkAllocateDescriptorSets(device.handle, ^descriptor_alloc_info, ^mut descriptor_set))
+        mut descriptor_set : VkDescriptorSet = default
+        vk_try(vkAllocateDescriptorSets(device.handle, ^descriptor_alloc_info, ^mut descriptor_set))
 
-        // buffer_infos := [
-        //     VkDescriptorBufferInfo(
-        //         buffer = frame.draw_data_buffer.get().handle
-        //         offset = 0
-        //         range = @sizeof(DrawData)
-        //     )
-        // ]
-        // write_descriptor_sets := [
-        //     VkWriteDescriptorSet(
-        //         sType = .WriteDescriptorSet
-        //         dstSet = descriptor_set
-        //         dstBinding = 0
-        //         dstArrayElement = 0
-        //         descriptorCount = cast buffer_infos.length
-        //         descriptorType = .StorageBuffer
-        //         pBufferInfo = buffer_infos.data
-        //     )
-        // ]
-        // vkUpdateDescriptorSets(device.handle, cast write_descriptor_sets.length, write_descriptor_sets.data, 0, null)
+        buffer_infos := [
+            VkDescriptorBufferInfo(
+                buffer = vertex_buffer.handle
+                offset = 0
+                range = cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex)
+            )
+        ]
+        write_descriptor_sets := [
+            VkWriteDescriptorSet(
+                sType = .WriteDescriptorSet
+                dstSet = descriptor_set
+                dstBinding = 0
+                dstArrayElement = 0
+                descriptorCount = cast buffer_infos.length
+                descriptorType = .StorageBuffer
+                pBufferInfo = buffer_infos.data
+            )
+        ]
+        vkUpdateDescriptorSets(device.handle, cast write_descriptor_sets.length, write_descriptor_sets.data, 0, null)
 
         return Ok(Mesh(
             name            = mesh.name.clone()
@@ -72,7 +72,7 @@ impl Mesh {
             index_buffer    = index_buffer
             index_count     = cast mesh.triangles.count()
             vertex_buffer_size  = cast mesh.vertices.count() * @sizeof(ObjMesh.Vertex)
-            // descriptor_set  = descriptor_set
+            descriptor_set  = descriptor_set
         ))
     }
 

@@ -99,17 +99,14 @@ impl HelloTriangleApplication {
             vk_try(vkMapMemory(self.context.device.handle, frame.draw_data_buffer.get().memory, 0, @sizeof(DrawData), .None, cast ^mut frame.draw_data))
             *frame.draw_data = DrawData()
 
-            descriptor_set_layouts := [self.graphics_pipeline.frame_set_layout, self.graphics_pipeline.mesh_set_layout]
+            descriptor_set_layouts := [self.graphics_pipeline.frame_set_layout]
             descriptor_alloc_info := VkDescriptorSetAllocateInfo(
                 sType               = .DescriptorSetAllocateInfo
                 descriptorPool      = self.descriptor_pool
                 descriptorSetCount  = cast descriptor_set_layouts.length
                 pSetLayouts         = descriptor_set_layouts.data
             )
-            mut descriptor_sets : [2]VkDescriptorSet = default
-            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, descriptor_sets.data))
-            frame.frame_descriptor_set = *descriptor_sets[0]
-            frame.mesh_descriptor_set = *descriptor_sets[1]
+            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, ^mut frame.frame_descriptor_set))
 
             self.frames.add(frame)
         }
@@ -119,7 +116,10 @@ impl HelloTriangleApplication {
             if mesh_files.count() == 0 {
                 return Err(fmt.format("No arguments provided"))
             }
-            self.load_mesh(mesh_files.access(0).slice())
+            match self.load_mesh(mesh_files.access(0).slice()) {
+                Ok($mesh) -> self.meshes.add(mesh)
+                Err($msg) -> io.formatln("{}", [msg.slice()])
+            }
         } else {
             return Err(fmt.format("No arguments provided"))
         }
@@ -127,38 +127,14 @@ impl HelloTriangleApplication {
         return Ok()
     }
 
-    load_mesh :: (&mut Self, mesh_file: string) -> Result[(), String] {
-        new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, mesh_file)))
-
-        vkDeviceWaitIdle(self.context.device.handle)
-
-        if !self.mesh.is_null() then self.mesh.get().destroy(&self.context.device)
-
-        for(by_ref=true) frame in self.frames[..] {
-            vertex_buffer_info := VkDescriptorBufferInfo(
-                buffer = new_mesh.get().vertex_buffer.handle
-                offset = 0
-                range = new_mesh.get().vertex_buffer_size
-            )
-            write_mesh_descriptor_set := VkWriteDescriptorSet(
-                sType = .WriteDescriptorSet
-                dstSet = frame.mesh_descriptor_set
-                dstBinding = 0
-                dstArrayElement = 0
-                descriptorCount = 1
-                descriptorType = .StorageBuffer
-                pBufferInfo = ^vertex_buffer_info
-            )
-            vkUpdateDescriptorSets(self.context.device.handle, 1, &write_mesh_descriptor_set, 0, null)
-        }
-
+    load_mesh :: (&mut Self, mesh_file: string) -> Result[Rc[Mesh], String] {
+        new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, self.graphics_pipeline.mesh_set_layout, self.descriptor_pool, mesh_file)))
 
         self.mesh_file.append_string(mesh_file)
         self.mesh_file.as_cstring()
         self.mesh_file.clear()
 
-        self.mesh = new_mesh
-        return Ok()
+        return Ok(new_mesh)
     }
 
     on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage, depth: VkImage) {
@@ -217,7 +193,6 @@ impl HelloTriangleApplication {
             clearValueCount = cast clear_values.length
             pClearValues    = clear_values.data
         )
-        // render imgui
 
         vkCmdResetQueryPool(frame.command_buffer, frame.query_pool, 0, 100)
         vkCmdWriteTimestamp(frame.command_buffer, .BottomOfPipeBit, frame.query_pool, 0)
@@ -277,12 +252,12 @@ impl HelloTriangleApplication {
         vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
 
         vertex_buffer_offset : VkDeviceSize = 0
-        vkCmdBindIndexBuffer(frame.command_buffer, self.mesh.get().index_buffer.handle, 0, .Uint32)
-        descriptor_sets := [frame.frame_descriptor_set, frame.mesh_descriptor_set]
-        vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 1, 1, ^frame.mesh_descriptor_set, 0, null)
-        for 0..1 {
-            // vkCmdDraw(frame.command_buffer, cast self.mesh.get().vertices.count(), 1, 0, 0)
-            vkCmdDrawIndexed(frame.command_buffer, cast self.mesh.get().index_count, 1, 0, 0, 0)
+
+        if self.meshes.count() > 0 {
+            mesh := self.meshes[0]
+            vkCmdBindIndexBuffer(frame.command_buffer, mesh.get().index_buffer.handle, 0, .Uint32)
+            vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 1, 1, ^mesh.get().descriptor_set, 0, null)
+            vkCmdDrawIndexed(frame.command_buffer, cast mesh.get().index_count, 1, 0, 0, 0)
         }
 
         // render imgui stuff into command buffer
@@ -392,10 +367,10 @@ impl HelloTriangleApplication {
             }
 
             button_size := imgui.ImVec2(0, 0)
-            if imgui.Button("Reload Mesh"c, &mut button_size) {
+            if imgui.Button("Load Mesh"c, &mut button_size) {
                 mesh_file := string.from_cstring(cast self.mesh_file.get_raw())
                 match self.load_mesh(mesh_file) {
-                    Ok(_) -> {}
+                    Ok($mesh) -> self.meshes.add(mesh)
                     Err($err) -> {
                         io.formatln("{}", [err])
                     }

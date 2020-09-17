@@ -63,6 +63,27 @@ main :: () -> Result[(), String] {
         location := spvc_compiler_get_decoration(compiler, input.id, .Location)
         io.formatln("    [{}] layout(location={}) {}", [it_index, location, *input])
     }
+
+    mut storage_buffers : []spvc_reflected_resource = default
+    spvc_try(spvc_resources_get_resource_list_for_type(resources, .StorageBuffer, cast ^storage_buffers.data, cast ^storage_buffers.length))
+
+    io.formatln("storage buffers: {}", [storage_buffers.length])
+    for(by_ref=true) sb in storage_buffers {
+        location := spvc_compiler_get_decoration(compiler, sb.id, .Binding)
+        set := spvc_compiler_get_decoration(compiler, sb.id, .DescriptorSet)
+        io.formatln("    [{}] layout(binding={}, set={}) {}", [it_index, location, set, *sb])
+    }
+
+    mut uniform_buffers : []spvc_reflected_resource = default
+    spvc_try(spvc_resources_get_resource_list_for_type(resources, .UniformBuffer, cast ^uniform_buffers.data, cast ^uniform_buffers.length))
+
+    io.formatln("uniform buffers: {}", [uniform_buffers.length])
+    for(by_ref=true) sb in uniform_buffers {
+        location := spvc_compiler_get_decoration(compiler, sb.id, .Binding)
+        set := spvc_compiler_get_decoration(compiler, sb.id, .DescriptorSet)
+        io.formatln("    [{}] layout(binding={}, set={}) {}", [it_index, location, set, *sb])
+    }
+
     return Ok()
 }
 
