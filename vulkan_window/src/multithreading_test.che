@@ -1,0 +1,255 @@
+use import std.thread
+use import std.array
+use import std.profiling
+
+io :: import std.io
+fmt :: import std.fmt
+
+enable_profiler :: true
+
+VkCommandPool :: ^void
+VkCommandBuffer :: ^void
+Renderer :: struct {}
+
+FrameData :: struct {
+    renderer : Renderer
+}
+
+ThreadFrameData :: struct {
+    command_pool    : VkCommandPool
+    command_buffers : Array[VkCommandBuffer]
+}
+
+RenderWorkerContext :: struct {
+    thread_index    : int
+    current_frame   : int
+    frame_data      : &FrameData
+
+    frames          : Array[ThreadFrameData]
+}
+
+VulkanThreadContext :: struct {
+    running  := true
+    acquires := [0, 0]
+    commands := [0, 0]
+    presents := [0, 0]
+
+    mutex           := Mutex.new()
+    commands_done   := [Semaphore.new(1), Semaphore.new(1)]
+    current_frame   := 0
+}
+
+impl VulkanThreadContext {
+    acquire :: (&mut Self, frame: int) {
+        _ := Timer.start(@function_signature())
+        mutex.lock()
+        defer mutex.release()
+        *acquires[frame] += 1
+    }
+
+    submit :: (&mut Self, frame: int) {
+        _ := Timer.start(@function_signature())
+        mutex.lock()
+        defer mutex.release()
+        *commands[frame] += 1
+    }
+
+    present :: (&mut Self, frame: int) {
+        _ := Timer.start(@function_signature())
+        mutex.lock()
+        defer mutex.release()
+        *presents[frame] += 1
+    }
+
+    stop :: (&mut Self) {
+        mutex.lock()
+        defer mutex.release()
+        running = false
+    }
+
+    vulkan_thread :: (&mut Self) {
+        loop {
+            mutex.lock()
+            defer mutex.release()
+            if !self.running then break
+            if *acquires[current_frame] > 0 {
+                *acquires[current_frame] -= 1
+                step := fmt.format("[Frame {}] acquiring swapchain image", [current_frame])
+                _ := Timer.start(step.slice())
+                log_gpu("[Frame {}] {}...", [current_frame, step.slice()])
+                mutex.release()
+                Thread.sleep(1)
+                mutex.lock()
+                log_gpu("[Frame {}] {} done", [current_frame, step.slice()])
+            }
+
+            mut next_frame := false
+            if *commands[current_frame] > 0 {
+                *commands[current_frame] -= 1
+                step := fmt.format("[Frame {}] executing commands", [current_frame])
+                _ := Timer.start(step.slice())
+                log_gpu("[Frame {}] {}...", [current_frame, step.slice()])
+                mutex.release()
+                Thread.sleep(3)
+                mutex.lock()
+                log_gpu("[Frame {}] {} done", [current_frame, step.slice()])
+
+                commands_done[current_frame].get_mut().give()
+                *presents[current_frame] += 1
+                next_frame = true
+            }
+            if *presents[current_frame] == 2 {
+                *presents[current_frame] -= 2
+                step := fmt.format("[Frame {}] presenting image", [current_frame])
+                _ := Timer.start(step.slice())
+                log_gpu("[Frame {}] {}...", [current_frame, step.slice()])
+                mutex.release()
+                Thread.sleep(1)
+                mutex.lock()
+                log_gpu("[Frame {}] {} done", [current_frame, step.slice()])
+            }
+            
+            if next_frame {
+                current_frame = (current_frame + 1) % 2
+            }
+        }
+    }
+}
+
+Main :: () {
+    Instrumentor.init(thread_safe = true)
+    Instrumentor.get().begin_session("multithreading_test", "multithreading_test.json")
+    defer Instrumentor.get().end_session()
+
+    thread_count := 3
+    frames_in_flight := 2
+
+    thread_pool := ThreadPool.create(thread_count)
+
+    frame_data := Array[FrameData].new(frames_in_flight)
+    for 0 .. frames_in_flight {
+        frame_data.add(FrameData(
+            renderer = Renderer()
+        ))
+    }
+
+    mut render_workers := Array[RenderWorkerContext].new(thread_count)
+    for 0 .. thread_count {
+        frames := Array[ThreadFrameData].new(frames_in_flight)
+        for 0 .. frames_in_flight {
+            frames.add(ThreadFrameData(
+                command_pool    = null
+                command_buffers = Array[VkCommandBuffer].new()
+            ))
+        }
+
+        render_workers.add(RenderWorkerContext(
+            thread_index    = it_index
+            current_frame   = 0
+            frame_data      = frame_data[0]
+            frames          = frames
+        ))
+    }
+
+    mut vulkan := VulkanThreadContext(
+    )
+    vulkan_thread := Thread.new(cast vulkan.vulkan_thread)
+    // vulkan_thread := Thread.create_mut_ref(VulkanThreadContext.vulkan_thread, &mut vulkan)
+
+    mut current_frame := 0
+    for 0 .. 25 {
+        scope_name := fmt.format("Frame {}", [current_frame])
+        _ := Timer.start(scope_name.slice())
+
+        log_cpu("[Frame {}] begin frame", [current_frame])
+        log_cpu("[Frame {}] poll events", [current_frame])
+        // poll events
+        poll_events()
+
+        log_cpu("[Frame {}] acquire image", [current_frame])
+        vulkan.acquire(current_frame)
+
+        // update scene
+        log_cpu("[Frame {}] update", [current_frame])
+        update()
+
+        // record command buffers
+        log_cpu("[Frame {}] start render record threads", [current_frame])
+        for(by_ref=true) ctx in render_workers.slice_mut() {
+            ctx.frame_data = frame_data[current_frame]
+            thread_pool.enqueue_mut(render_worker_thread, ctx)
+        }
+
+        log_cpu("[Frame {}] wait until render record is done", [current_frame])
+        thread_pool.wait_until_empty()
+        log_cpu("[Frame {}] waiting done", [current_frame])
+
+        {
+            scope_name := fmt.format("Frame {}, waiting for prev", [current_frame])
+            _ := Timer.start(scope_name.slice())
+            log_cpu("[Frame {}] waiting for previous version of this frame to finish", [current_frame])
+            vulkan.commands_done[current_frame].get_mut().take()
+            log_cpu("[Frame {}] waiting done", [current_frame])
+        }
+
+
+        log_cpu("[Frame {}] submit command buffers", [current_frame])
+        // submit all command buffers
+        for(by_ref=true) ctx in render_workers[..] {
+            for(by_ref=true) buff in ctx.frames[current_frame].command_buffers[..] {
+                // submit buff
+            }
+        }
+        vulkan.submit(current_frame)
+
+        // present
+        log_cpu("[Frame {}] submit present command", [current_frame])
+        vulkan.present(current_frame)
+
+        log_cpu("[Frame {}] end frame", [current_frame])
+        current_frame = (current_frame + 1) % frames_in_flight
+    }
+
+    vulkan.stop()
+    vulkan_thread.join()
+}
+
+render_worker_thread :: (context: &mut RenderWorkerContext) {
+    _ := Timer.start(@function_signature())
+    // for every object assigned to this thread
+    render(&mut context.frame_data.renderer)
+}
+
+
+poll_events :: () {
+    _ := Timer.start(@function_signature())
+    log_cpu("poll events...")
+    Thread.sleep(1)
+}
+
+update :: () {
+    _ := Timer.start(@function_signature())
+    log_cpu("updating scene...")
+    Thread.sleep(10)
+}
+
+render :: (renderer: &mut Renderer) {
+    _ := Timer.start(@function_signature())
+    // simulate work
+    for i in 0..3 {
+        log_cpu("recording render commands...")
+        Thread.sleep(1)
+    }
+}
+
+#file_scope
+
+log_cpu :: (format: string, args: []^any = []) {
+    msg := fmt.format(format, args)
+    // io.formatln("[CPU {}] {}", [Thread.current().id, msg.slice()])
+}
+
+log_gpu :: (format: string, args: []^any = []) {
+    msg := fmt.format(format, args)
+    // io.formatln("                                                               [GPU {}] {}", [Thread.current().id, msg.slice()])
+}

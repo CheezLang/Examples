@@ -127,7 +127,7 @@ impl HelloTriangleApplication {
     }
 
     load_mesh :: (&mut Self, mesh_file: string) -> Result[Rc[Mesh], String] {
-        io.formatln("loading mesh {}...", [file.slice()])
+        io.formatln("loading mesh {}...", [mesh_file])
         new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, self.graphics_pipeline.mesh_set_layout, self.descriptor_pool, mesh_file)))
 
         self.mesh_file.append_string(mesh_file)
