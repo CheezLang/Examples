@@ -38,7 +38,7 @@ vec2 :: Vector2[f32]
 vec3 :: Vector3[f32]
 vec4 :: Vector4[f32]
 
-MaxFramesInFlight :: 1
+MaxFramesInFlight :: 2
 
 Main :: () {
     args := clap.get_cmd_args()
@@ -60,7 +60,7 @@ impl HelloTriangleApplication {
             try(vk.Shader.new(&self.context.device, "triangle.vert.spv"))
             try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
         ]
-        defer { for(by_ref=true) shader in shaders[..] do shader.destroy(self.context.device.handle) }
+        defer { for &mut shader in shaders[..] do shader.destroy(self.context.device.handle) }
         self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..]))
 
         for i in 0 .. MaxFramesInFlight {
@@ -113,7 +113,7 @@ impl HelloTriangleApplication {
 
         mesh_files := clap.parse_arguments(Array[String], args)
         if mesh_files != null {
-            for(by_ref=true) file in mesh_files.slice() {
+            for &file in mesh_files.slice() {
                 match self.load_mesh(file.slice()) {
                     Ok($mesh) -> self.meshes.add(mesh)
                     Err($msg) -> io.formatln("{}", [msg.slice()])

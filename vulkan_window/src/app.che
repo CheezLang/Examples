@@ -293,11 +293,11 @@ impl HelloTriangleApplication {
     }
     
     cleanup_swapchain :: (&mut Self) {
-        for(by_ref=false) framebuffer in self.swapchain.get().get_framebuffers() {
+        for framebuffer in self.swapchain.get().get_framebuffers() {
             if framebuffer != null then vkDestroyFramebuffer(self.context.device.handle, framebuffer, null)
         }
 
-        for(by_ref=false) view in self.swapchain.get().get_image_views() {
+        for view in self.swapchain.get().get_image_views() {
             if view != null then vkDestroyImageView(self.context.device.handle, view, null)
         }
 
@@ -320,7 +320,7 @@ impl HelloTriangleApplication {
             mesh.get().destroy(&self.context.device)
         }
 
-        for(by_ref=true) frame in self.frames[..] {
+        for &frame in self.frames[..] {
             vkDestroyFence(self.context.device.handle, frame.fence_draw_done, null)
             vkDestroySemaphore(self.context.device.handle, frame.sema_acquire, null)
             vkDestroySemaphore(self.context.device.handle, frame.sema_render, null)
