@@ -1,0 +1,45 @@
+use import std.array
+use import std.string
+
+fmt :: import std.fmt
+io  :: import std.io
+
+clap :: import clap.clap
+
+use import scene
+
+Arguments :: struct {
+    #help("Number of threads to use while rendering")
+    threads := 1
+
+    #help("Path of the generated output image") 
+    out : String
+
+    #help("Path to scene file (.scn)")
+    scene : String
+}
+
+Main :: () {
+    match app_main() {
+        Ok() -> {}
+        Err($msg) -> {
+            io.formatln("[ERROR] {}", [msg.slice()])
+        }
+    }
+
+    io.formatln("End")
+}
+
+app_main :: () -> Result[(), String] {
+    match clap.parse_cmd_arguments(Arguments) {
+        Ok($args) -> {
+            io.formatln("{}", [&args])
+            scene := try(Scene.from_file(args.scene.slice()))
+        }
+        Err(_) -> {
+            help := clap.get_help_message(@type_info(Arguments))
+            io.formatln("Failed to parse arguments. {}", [help.slice()])
+        }
+    }
+    return Ok()
+}

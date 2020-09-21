@@ -1,0 +1,127 @@
+use import std.string
+use import std.array
+use import std.map
+use import std.math
+use import std.rc
+use import std.printable
+
+use import math
+
+fmt :: import std.fmt
+
+#export_scope
+
+ParamSet :: struct {
+    bools   := Array[Rc[ParamSetItem[bool]]].new()
+    ints    := Array[Rc[ParamSetItem[int]]].new()
+    floats  := Array[Rc[ParamSetItem[real]]].new()
+    vec2s   := Array[Rc[ParamSetItem[vec2]]].new()
+    vec3s   := Array[Rc[ParamSetItem[vec3]]].new()
+    vec4s   := Array[Rc[ParamSetItem[vec4]]].new()
+    strings := Array[Rc[ParamSetItem[String]]].new()
+    spectra := Array[Rc[ParamSetItem[Spectrum]]].new()
+    textures := Array[Rc[ParamSetItem[String]]].new()
+}
+
+impl ParamSet {
+    new :: () -> ParamSet {
+        return ParamSet()
+    }
+
+    replace :: (arr: &mut Array[Rc[ParamSetItem[$T]]], new_item: Rc[ParamSetItem[T]]) {
+        for &mut item in arr.slice_mut() {
+            if item.get().name.slice() == new_item.get().name.slice() {
+                *item = new_item
+                return
+            }
+        }
+        arr.add(new_item)
+    }
+
+    remove :: (&mut Self, $T: type, name: string) -> bool {
+        remove_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> bool {
+            return match arr.index_of(name, (v, n) => v.get().name.slice() == n) {
+                Some($i) -> {
+                    arr.remove_at(i)
+                    true
+                }
+                None -> false
+            }
+        }
+
+        return match T {
+            bool    -> remove_impl(&mut self.bools, name)
+            int     -> remove_impl(&mut self.ints, name)
+            real    -> remove_impl(&mut self.floats, name)
+            vec2    -> remove_impl(&mut self.vec2s, name)
+            vec3    -> remove_impl(&mut self.vec3s, name)
+            vec4    -> remove_impl(&mut self.vec4s, name)
+            String  -> remove_impl(&mut self.strings, name)
+            _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
+        }
+    }
+    add :: (&mut Self, name: string, values: []$T) {
+        match T {
+            bool    -> replace(&mut self.bools, ParamSetItem[T].new(name, values))
+            int     -> replace(&mut self.ints, ParamSetItem[T].new(name, values))
+            real    -> replace(&mut self.floats, ParamSetItem[T].new(name, values))
+            vec2    -> replace(&mut self.vec2s, ParamSetItem[T].new(name, values))
+            vec3    -> replace(&mut self.vec3s, ParamSetItem[T].new(name, values))
+            vec4    -> replace(&mut self.vec4s, ParamSetItem[T].new(name, values))
+            String  -> replace(&mut self.strings, ParamSetItem[T].new(name, values))
+            _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
+        }
+    }
+}
+
+impl Printable for ParamSet {
+    print_arr :: (name: string, arr: &Array[Rc[ParamSetItem[$T]]], result: &mut String) {
+        if arr.count() == 0 then {
+            return
+        }
+        fmt.format_into(result, "    {}: [", [name])
+        for &v in arr[..] {
+            if it_index > 0 then result.append_string(", ")
+            v.get().print(result, "")
+        }
+        fmt.format_into(result, "]`n")
+    }
+
+    print :: (&Self, result: &mut String, format: string) {
+        result.append_string("ParamSet(`n")
+        print_arr("bools", &self.bools, result)
+        print_arr("ints", &self.ints, result)
+        print_arr("floats", &self.floats, result)
+        print_arr("vec2s", &self.vec2s, result)
+        print_arr("vec3s", &self.vec3s, result)
+        print_arr("vec4s", &self.vec4s, result)
+        print_arr("strings", &self.strings, result)
+        result.append_string(")")
+    }
+}
+
+ParamSetItem :: struct(T: type) {
+    name    : String
+    values  : Array[T]
+    used    : bool
+}
+
+impl(T: type) ParamSetItem[T] {
+    new :: (name: string, values: []T) -> Rc[Self] {
+        return Rc[Self].new(Self(
+            name    = name.to_owned()
+            values  = Array[T].from_slice(values)
+            used    = false
+        ))
+    }
+}
+
+impl(T: type) Printable for ParamSetItem[T] {
+    print :: (&Self, result: &mut String, format: string) {
+        if self.values.count() == 1 {
+            fmt.format_into(result, "`"{} {}`" {}", [@typename(T), self.name.slice(), *self.values[0]])
+        } else {
+            fmt.format_into(result, "`"{} {}`" {}", [@typename(T), self.name.slice(), self.values[..]])
+        }
+    }
+}

@@ -1,0 +1,36 @@
+use import std.mem.arena_allocator
+use import std.array
+use import std.string
+
+mem :: import std.mem.allocator
+io  :: import std.io
+fmt :: import std.fmt
+fs  :: import std.io.fs
+
+use import scene_parser
+
+#export_scope
+
+Scene :: struct {
+    allocator : ArenaAllocator
+}
+
+impl Scene {
+    from_file :: (path: string) -> Result[Scene, String] {
+        text := try(fs.read_file(path))
+        allocator := ArenaAllocator.new(1024*1024)
+        return Parser.parse(text.slice(), allocator)
+    }
+}
+
+/*
+, 692046657728, 692046657232, 692046639432, 692046637960
+
+
+
+
+
+
+
+
+ */

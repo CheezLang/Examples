@@ -1,0 +1,794 @@
+use import std.string
+use import std.unicode
+use import std.array
+use import std.printable
+use import std.mem.arena_allocator
+use import std.math
+
+mem :: import std.mem.allocator
+C   :: import std.c
+io  :: import std.io
+fmt :: import std.fmt
+
+use import scene
+use import param_set
+use import math
+
+#export_scope
+
+Parser :: struct {
+    lexer       : &mut Lexer
+    allocator   : &mut mem.Allocator
+    scene       : &mut Scene
+}
+
+impl Parser {
+    parse :: (text: string, allocator: ArenaAllocator) -> Result[Scene, String] {
+        mut scene := Scene(allocator)
+        mut lexer := Lexer.from_string(text)
+
+        parser := Parser(&mut lexer, &mut scene.allocator, &mut scene)
+
+
+        {
+            param_set := ParamSet.new()
+            param_set.add("test", [true, false])
+            param_set.add("test2", [1.0f, 0.9f])
+            param_set.add("test3", [vec2(5.3, -99)])
+
+            io.formatln("{}", [&param_set])
+            io.formatln("remove real test: {}", [param_set.remove(real, "test")])
+            io.formatln("remove bool test: {}", [param_set.remove(bool, "test")])
+        }
+
+        loop {
+            // io.println("peek")
+            token := lexer.peek_token()
+            // io.println("peek 2")
+            io.formatln("{}", [token])
+
+            match token.typ {
+                .KwLookAt -> try(parser.parse_look_at())
+                // .KwCamera -> try(parser.parse_camera())
+
+                .EOF -> break
+                .Unknown -> {
+                    return Err(fmt.format("Unknown token: {}", [token.typ]))
+                }
+
+                .Error -> {
+                    return Err(fmt.format("Invalid token: {}", [token.typ]))
+                }
+
+                _ -> {
+                    return Err(fmt.format("Unexpected token: {}", [token.typ]))
+                }
+            }
+        }
+
+        return Ok(scene)
+    }
+
+    parse_look_at :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwLookAt))
+
+        mut eye := Vector3[float]()
+        eye.x = try(self.parse_number())
+        eye.y = try(self.parse_number())
+        eye.z = try(self.parse_number())
+
+        mut look_at := Vector3[float]()
+        look_at.x = try(self.parse_number())
+        look_at.y = try(self.parse_number())
+        look_at.z = try(self.parse_number())
+
+        mut up := Vector3[float]()
+        up.x = try(self.parse_number())
+        up.y = try(self.parse_number())
+        up.z = try(self.parse_number())
+
+        return Ok()
+    }
+
+    // parse_camera :: (&mut Self) -> Result[(), String] {
+
+    // }
+
+    parse_number :: (&mut Self) -> Result[f32, String] {
+        token := lexer.next_token()
+        return match token.typ {
+            .NumberLiteral -> Ok(get_number_f32(&token))
+
+            .Minus -> {
+                num := try(self.parse_number())
+                Ok(-num)
+            }
+
+            .Plus -> {
+                num := try(self.parse_number())
+                Ok(num)
+            }
+
+            _ -> Err(fmt.format("Expected number, found {}", [token.typ]))
+        }
+    }
+
+    get_number_f32 :: (token: &Token) -> f32 {
+        return match token.data {
+            .Integer($i) -> f32(i)
+            .Double($d) -> f32(d)
+            _ -> @assert(false)
+        }
+    }
+
+    expect :: (&mut Self, typ: TokenType) -> Result[Token, String] {
+        token := lexer.next_token()
+        if token.typ != typ {
+            return Err(fmt.format("Unexpected {}, expected: ", [token.typ, typ]))
+        }
+        return Ok(token)
+    }
+}
+
+Lexer :: struct {
+    text        : string
+    location    : Location
+    peek        : Option[Token]
+    offset      : int
+}
+
+impl Lexer {
+    // i dont know why, but for some reason when I enable trace-stack this function crashes
+    // but with #nostacktrace it works...
+    // - NO, 09.12.19
+    from_string :: (content: string) -> Lexer #nostacktrace {
+        return Lexer(
+            text = content
+            location = Location(
+                file        = "string"
+                byte_index  = 0
+                byte_length = 1
+                line        = 1
+                column      = 1
+            )
+            offset          = 0
+            peek            = None
+        )
+    }
+
+    current_location :: (&Self) -> Location {
+        return match &peek {
+            Some($tok) -> tok.location
+            None -> location
+        }
+    }
+
+    expect_token :: (&mut Self, typ: TokenType) -> bool, Token {
+        token := next_token()
+        if int(token.typ) == int(typ) {
+            return true, token
+        } else {
+            return false, token
+        }
+    }
+
+    peek_token :: (&mut Self) -> &Token {
+        // io.println("peek_token()")
+        return match &peek {
+            Some($tok) -> tok
+
+            None -> {
+                tok := next_token()
+                // io.println("peek_token() 2")
+                peek = Some(tok)
+                // io.println("peek_token() 3")
+                &peek.Some
+            }
+        }
+    }
+
+    next_token :: (&mut Self) -> Token {
+        // io.println("next_token()")
+        match peek {
+            Some($t) -> {
+                peek = None
+                return t
+            }
+        }
+
+        skip_newlines_and_comments()
+
+        t := read_token()
+        
+        // io.println("next_token() 2")
+        return t
+    }
+
+    read_token :: (&mut Self) -> Token {
+        // io.println("read_token()")
+        mut token := Token(
+            typ      = TokenType.EOF
+            data     = TokenData.None
+            location = location
+            suffix   = None
+        )
+
+        token.location.byte_length = 0
+
+        if location.byte_index - offset >= text.bytes.length {
+            return token
+        }
+
+        curr, curr_len := {
+            x := peek_char(0)
+            x[0], int(x[1])
+        }
+        next, next_len := {
+            x := peek_char(1)
+            x[0], int(x[1])
+        }
+        next2, next_len2 := {
+            x := peek_char(2)
+            x[0], int(x[1])
+        }
+
+        // io.formatln("read_token() {}, {}, {}", [curr, next, next2])
+        match curr, next {
+            '[', _   -> simple_token(&token, TokenType.OpenBracket,    curr_len, 1)
+            ']', _   -> simple_token(&token, TokenType.ClosingBracket, curr_len, 1)
+            '+', _   -> simple_token(&token, TokenType.Plus,           curr_len, 1)
+            '-', _   -> simple_token(&token, TokenType.Minus,          curr_len, 1)
+
+            '"', _  -> {
+                parse_string_literal(&token, TokenType.StringLiteral, '"')
+            }
+
+            $x, _ if is_ident_begin(x) -> {
+                parse_identifier(&token, TokenType.Identifier)
+                check_keywords(&token)
+            }
+
+            // number literal
+            $x, _ if is_digit(x) or x == '.' -> {
+                parse_number_literal(&token)
+            }
+
+            _, _ -> {
+                // io.println("Unknown")
+                token.typ = TokenType.Unknown
+                location.byte_index += curr_len
+            }
+        }
+        // io.println("read_token() 3")
+
+        token.location.byte_length = location.byte_index - token.location.byte_index
+        token.location.end_column  = location.column
+        token.location.end_line    = location.line
+
+        // io.println("read_token() 4")
+        return token
+    }
+
+    parse_number_literal :: (&mut Self, token: &mut Token) {
+        token.typ = TokenType.NumberLiteral
+        mut base := 10
+        mut str := {
+            raw := @alloca(u8, 128)
+            str := String.from_raw_ptr(raw.data, raw.length)
+            str
+        }
+
+        mut is_float := true
+
+        LexerNumberState :: enum #copy {
+            Error
+            Init
+            Done
+            Z
+            X
+            B
+            DecDigit
+            Dec_
+            BinDigit
+            Bin_
+            HexDigit
+            Hex_
+            FloatPoint
+            FloatDigit
+            Float_
+        }
+
+        use LexerNumberState
+
+        mut state := Init
+        while location.byte_index - offset < text.bytes.length {
+            c, c_len := peek_char(0)
+            next, _  := peek_char(1)
+
+            match state {
+                Error -> break
+                Done  -> break
+
+                Init  -> {
+                    if c == '0' {
+                        &str += c
+                        state = Z
+                    } else if is_digit(c) {
+                        &str += c
+                        state = DecDigit
+                    } else if c == '.' {
+                       &str += "0."
+                       state = FloatPoint
+                    } else {
+                        state = Error
+                    }
+                }
+
+                Z -> match c {
+                    'x' -> {
+                        base = 16
+                        str.resize(0)
+                        state = X
+                    }
+                    'b' -> {
+                        base = 2
+                        str.resize(0)
+                        state = B
+                    }
+                    '.' if next != '.' -> {
+                        &str += c
+                        state = FloatPoint
+                    }
+                    $x if is_digit(x) -> {
+                        &str += x
+                        state = DecDigit
+                    }
+                    '_' -> {
+                        state = Dec_
+                    }
+                    _ -> {
+                        state = Done
+                    }
+                }
+
+                DecDigit -> match c {
+                    '.' if next != '.' -> {
+                        &str += c
+                        state = FloatPoint
+                    }
+                    '_' -> {
+                        state = Dec_
+                    }
+                    $x if is_digit(x) -> {
+                        &str += c
+                    }
+                    _ -> {
+                        state = Done
+                    }
+                }
+
+                Dec_ -> match c {
+                    $x if is_digit(x) -> {
+                        &str += c
+                        state = DecDigit
+                    }
+                    _ -> {
+                        state = Error
+                    }
+                }
+
+                FloatPoint -> {
+                    is_float = true
+                    if is_digit(c) {
+                        &str += c
+                        state = FloatDigit
+                    } else {
+                        state = Error
+                    }
+                }
+
+                FloatDigit -> match c {
+                    $c if is_digit(c) -> {
+                        &str += c
+                    }
+                    '_' -> {
+                        state = Float_
+                    }
+                    $_ -> {
+                        state = Done
+                    }
+                }
+
+                Float_ -> match c {
+                    $x if is_digit(x) -> {
+                        &str += c
+                        state = FloatDigit
+                    }
+                    _ -> {
+                        state = Error
+                    }
+                }
+
+                X -> match c {
+                    $c if is_hex_digit(c) -> {
+                        &str += c
+                        state = HexDigit
+                    }
+                    $_ -> {
+                        state = Error
+                    }
+                }
+
+                HexDigit -> match c {
+                    $c if is_hex_digit(c) -> {
+                        &str += c
+                    }
+                    '_' -> {
+                        state = Hex_
+                    }
+                    $_ -> {
+                        state = Done
+                    }
+                }
+
+                Hex_ -> match c {
+                    $x if is_hex_digit(x) -> {
+                        &str += c
+                        state = HexDigit
+                    }
+                    _ -> {
+                        state = Error
+                    }
+                }
+
+                B -> match c {
+                    $c if is_binary_digit(c) -> {
+                        &str += c
+                        state = BinDigit
+                    }
+                    $_ -> {
+                        state = Error
+                    }
+                }
+
+                BinDigit -> match c {
+                    $c if is_binary_digit(c) -> {
+                        &str += c
+                    }
+                    '_' -> {
+                        state = Bin_
+                    }
+                    $_ -> {
+                        state = Done
+                    }
+                }
+
+                Bin_ -> match c {
+                    $x if is_binary_digit(x) -> {
+                        &str += c
+                        state = BinDigit
+                    }
+                    _ -> {
+                        state = Error
+                    }
+                }
+            }
+
+            match state {
+                Done -> break
+                Error -> break
+                $_   -> {
+                    location.byte_index += int(c_len)
+                    location.column += 1
+                }
+            }
+        }
+
+        match state {
+            Error -> {
+                token.typ = TokenType.Error
+                token.data = TokenData.String("Invalid number literal")
+                return
+            }
+        }
+
+        &str += '`0'
+
+        if is_float {
+            d := C.strtod(cast str.get_raw(), null)
+            token.data = TokenData.Double(d)
+        } else {
+            i := C.strtoll(cast str.get_raw(), null, cast base)
+            token.data = TokenData.Integer(i)
+        }
+    }
+
+    simple_token :: (&mut Self, token: &mut Token, typ: TokenType, len: int, chars: int) {
+        token.typ = typ
+        location.byte_index += len
+        location.column += chars
+    }
+
+    parse_identifier :: (&mut Self, token: &mut Token, typ: TokenType) {
+        token.typ = typ
+        start := location.byte_index - offset
+
+        while location.byte_index - offset < text.bytes.length {
+            c, c_len := peek_char(0)
+            if !is_ident_char(c) then break
+            location.byte_index += int(c_len)
+            location.column += 1
+        }
+
+        str := text[start .. location.byte_index - offset]
+        token.data = TokenData.String(str)
+    }
+
+    parse_string_literal :: (&mut Self, token: &mut Token, typ: TokenType, end: char) {
+        token.typ = typ
+        location.byte_index += 1
+        location.column += 1
+        start := location.byte_index - offset
+
+        mut foundEnd := false
+        while location.byte_index - offset < text.bytes.length {
+            c, c_len := peek_char(0)
+            location.byte_index += int(c_len)
+            location.column += 1
+
+            if c == end {
+                foundEnd = true
+                break
+            } else if c == '\' {
+                if location.byte_index - offset >= text.bytes.length {
+                    // TODO: report error
+                    break
+                }
+
+                location.byte_index += int(c_len)
+                location.column += 1
+            }
+
+            if c == '`n' {
+                location.column = 1
+                location.line += 1
+            }
+        }
+
+        if !foundEnd {
+            // TODO: report
+        }
+
+        str := text[start .. location.byte_index - offset - 1]
+        token.data = TokenData.String(str)
+    }
+
+    skip_newlines_and_comments :: (&mut Self) {
+        while location.byte_index - offset < text.bytes.length {
+            curr, curr_len := peek_char(0)
+            next, next_len := peek_char(1)
+
+            if curr == '#' {
+                parse_single_line_comment()
+            } else if curr == '`r' {
+                location.byte_index += int(curr_len)
+                location.column += 1
+            } else if curr == '`n' {
+                location.line += 1
+                location.byte_index += int(curr_len)
+                location.column = 1
+            } else if curr == ' ' or curr == '`t' {
+                location.byte_index += int(curr_len)
+                location.column += 1
+            } else {
+                break
+            }
+        }
+    }
+
+    peek_char :: (&Self, mut offset: int) -> char, i32 {
+        mut index := location.byte_index - self.offset
+        while offset > 0, offset -= 1 {
+            _, len := Utf8.decode(text.slice().bytes[index..text.bytes.length])
+            index += int(len)
+        }
+        if index >= text.bytes.length {
+            return char(0), 0
+        }
+
+        return Utf8.decode(text.bytes[index..text.bytes.length])
+    }
+
+    parse_single_line_comment :: (&mut Self) {
+        while location.byte_index - offset < text.bytes.length {
+            next, len := peek_char(0)
+            if next == '`n' {
+                break
+            }
+
+            location.byte_index += int(len)
+            location.column += 1
+        }
+    }
+
+    check_keywords :: (&Self, token: &mut Token) {
+        match token.data {
+            TokenData.String($str) -> {
+                token.typ =
+                    if      str == "LookAt"          then TokenType.KwLookAt
+                    else if str == "Camera"          then TokenType.KwCamera
+                    else if str == "Sampler"         then TokenType.KwSampler
+                    else if str == "Integrator"      then TokenType.KwIntegrator
+                    else if str == "Film"            then TokenType.KwFilm
+                    else if str == "WorldBegin"      then TokenType.KwWorldBegin
+                    else if str == "WorldEnd"        then TokenType.KwWorldEnd
+                    else if str == "AttributeBegin"  then TokenType.KwAttributeBegin
+                    else if str == "AttributeEnd"    then TokenType.KwAttributeEnd
+                    else if str == "Shape"           then TokenType.KwShape
+                    else if str == "Material"        then TokenType.KwMaterial
+                    else if str == "Texture"         then TokenType.KwTexture
+                    else if str == "Translate"       then TokenType.KwTranslate
+                    else if str == "LightSource"     then TokenType.KwLightSource
+                    else token.typ
+            }
+        }
+    }
+}
+
+// token
+Location :: struct #copy {
+    file        : string = default
+    byte_index  : int    = default
+    byte_length : int    = default
+    line        : int    = default
+    column      : int    = default
+    end_column  : int    = default
+    end_line    : int    = default
+}
+
+impl Location {
+    to :: (Self, end: Location) -> Location {
+        return Location(
+            file        = file
+            byte_index  = byte_index
+            byte_length = end.byte_index + end.byte_length - byte_index
+            line        = line
+            column      = column
+            end_column  = end.end_column
+            end_line    = end.end_line
+        )
+    }
+
+    end :: (Self) -> Location {
+        return Location(
+            file        = file
+            byte_index  = byte_index + byte_length
+            byte_length = 0
+            line        = end_line
+            column      = end_column
+            end_column  = end_column
+            end_line    = end_line
+        )
+    }
+}
+
+Token :: struct #copy {
+    typ         : TokenType
+    location    : Location
+    suffix      : Option[string]
+    data        : TokenData
+}
+
+TokenData :: enum #copy {
+    None
+    String  : string
+    Integer : int
+    Double  : double
+}
+
+impl Printable for Location {
+    print :: (&Self, str: &mut String, format: string) {
+        str.appendf("{}:{}:{}", (file, line, column, end_line))
+    }
+}
+
+impl Printable for Token {
+    print :: (&Self, str: &mut String, format: string) {
+        fmt.format_into(str, "{} ({})", [typ, location])
+        match data {
+            TokenData.String($s) -> str.appendf(" String({})", s)
+            TokenData.Integer($s) -> str.appendf(" Int({})", s)
+            TokenData.Double($s) -> str.appendf(" Double({})", s)
+        }
+
+        match suffix {
+            Some($s) -> str.appendf(" Suffix(`"{}`")", (s))
+        }
+    }
+}
+
+impl Printable for TokenType {
+    print :: (&Self, str: &mut String, format: string) {
+        use TokenType
+
+        str.append_string(match self {
+            .Error              -> "Error"
+            .Unknown            -> "Unknown"
+            .EOF                -> "EOF"
+            .StringLiteral      -> "StringLiteral"
+            .NumberLiteral      -> "NumberLiteral"
+            .Identifier         -> "Identifier"
+            .Plus               -> "Plus"
+            .Minus              -> "Minus"
+            .Period             -> "Period"
+            .OpenBracket        -> "OpenBracket"
+            .ClosingBracket     -> "ClosingBracket"
+            .KwLookAt           -> "LookAt"
+            .KwCamera           -> "Camera"
+            .KwSampler          -> "Sampler"
+            .KwIntegrator       -> "Integrator"
+            .KwFilm             -> "Film"
+            .KwWorldBegin       -> "WorldBegin"
+            .KwWorldEnd         -> "WorldEnd"
+            .KwAttributeBegin   -> "AttributeBegin"
+            .KwAttributeEnd     -> "AttributeEnd"
+            .KwShape            -> "Shape"
+            .KwMaterial         -> "Material"
+            .KwTexture          -> "Texture"
+            .KwTranslate        -> "Translate"
+            .KwLightSource      -> "LightSource"
+
+            _ -> @assert(false)
+        })
+    }
+}
+
+TokenType :: enum #copy {
+    Error
+    Unknown
+    EOF
+    StringLiteral
+    NumberLiteral
+    Identifier
+    Plus
+    Minus
+    Period
+    OpenBracket
+    ClosingBracket
+
+    KwLookAt
+    KwCamera
+    KwSampler
+    KwIntegrator
+    KwFilm
+    KwWorldBegin
+    KwWorldEnd
+    KwAttributeBegin
+    KwAttributeEnd
+    KwShape
+    KwMaterial
+    KwTexture
+    KwTranslate
+    KwLightSource
+}
+
+#file_scope
+is_ident_begin :: (c: char) -> bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c == '_') or u32(c) > 127
+}
+
+is_ident_char :: (c: char) -> bool {
+    return is_ident_begin(c) or (c >= '0' and c <= '9')
+}
+
+is_digit :: (c: char) -> bool {
+    return c >= '0' and c <= '9'
+}
+
+is_hex_digit :: (c: char) -> bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+}
+
+is_binary_digit :: (c: char) -> bool {
+    return c >= '0' and c <= '1'
+}

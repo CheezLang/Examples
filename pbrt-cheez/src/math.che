@@ -1,0 +1,11 @@
+use import std.math
+
+#export_scope
+
+real :: f32
+
+vec2 :: Vector2[real]
+vec3 :: Vector3[real]
+vec4 :: Vector4[real]
+
+Spectrum :: struct {}
