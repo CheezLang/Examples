@@ -1,6 +1,8 @@
 use import std.array
 use import std.string
 use import std.profiling
+use import std.math
+use import std.matrix
 
 fmt :: import std.fmt
 io  :: import std.io
@@ -38,17 +40,24 @@ Main :: () {
         }
     }
 
-    io.formatln("End")
+    io.formatln("Done")
 }
 
 app_main :: () -> Result[(), String] {
     profile_function()
-    match clap.parse_cmd_arguments(Arguments) {
+    args := {
+        profile_scope("parse_cmd_arguments()")
+        clap.parse_cmd_arguments(Arguments)
+    }
+    match args {
         Ok($args) -> {
-            io.formatln("{}", [&args])
+            // io.formatln("{}", [&args])
             enable_logging = args.log
 
-            text := try(fs.read_file(args.scene.slice()))
+            text := {
+                profile_scope("read_file()")
+                try(fs.read_file(args.scene.slice()))
+            }
 
             mut pbrt := Pbrt.new()
 

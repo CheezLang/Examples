@@ -12,6 +12,10 @@ profile_function :: () #macro #transparent {
     _ := Timer.start(@function_signature())
 }
 
+profile_scope :: (name: string) #macro #transparent {
+    _ := Timer.start(name)
+}
+
 log_error :: (msg: string, args: []^any = []) {
     thread_id := Thread.current().id
     message := fmt.format(msg, args)

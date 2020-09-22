@@ -1,7 +1,9 @@
 use import std.mem.arena_allocator
 use import std.array
+use import std.map
 use import std.string
 use import std.profiling
+use import std.rc
 
 mem :: import std.mem.allocator
 fmt :: import std.fmt
@@ -11,21 +13,101 @@ use import scene
 use import math
 use import param_set
 use import core
+use import integrator
 
 #export_scope
 
-Pbrt :: struct {
-    allocator : ArenaAllocator
+ApiState :: enum {
+    Options
+    World
+}
 
-    // global settings
-    current_transforms  : [2]Transform = [Transform(), Transform()]
-    active_transforms   : int = int.max
+TransformSet :: struct #copy {
+    transforms : [2]Transform = [Transform(), Transform()]
+}
 
-    // current scene
-    scene := Option[Scene].None
+impl TransformSet {
+    inverse :: (&Self) -> TransformSet {
+        return TransformSet([transforms[0].inverse(), transforms[1].inverse()])
+    }
+}
+
+RenderOptions :: struct {
+    camera_name         := String.from_string("perspective")
+    camera_params       := ParamSet()
+    camera_to_world     := TransformSet()
+    sampler_name        := String.from_string("halton")
+    sampler_params      := ParamSet()
+    integrator_name     := String.from_string("path")
+    integrator_params   := ParamSet()
+    film_name           := String.from_string("image")
+    film_params         := ParamSet()
+}
+
+impl RenderOptions {
+    make_integrator :: (&Self) -> Result[Rc[Integrator], String] {
+        return Err(fmt.format("Failed to create integrator"))
+    }
+
+    make_scene :: (&Self) -> Rc[Scene] {
+        return Rc[Scene].empty()
+    }
+}
+
+Texture :: struct(T: type) {
 
 }
 
+MaterialInstance :: struct {
+
+}
+
+GraphicsState :: struct {
+    FloatTextureMap     :: Map[string, Rc[Texture[real]]]
+    float_textures      := Rc[FloatTextureMap].new(FloatTextureMap.new())
+    
+    SpectrumTextureMap  :: Map[string, Rc[Texture[Spectrum]]]
+    spectrum_textures   := Rc[SpectrumTextureMap].new(SpectrumTextureMap.new())
+    
+    NamedMaterialMap    :: Map[string, Rc[MaterialInstance]]
+    named_materials     := Rc[NamedMaterialMap].new(NamedMaterialMap.new())
+
+    float_textures_shared       := false
+    spectrum_textures_shared    := false
+    named_materials_shared      := false
+}
+
+impl Clone for GraphicsState {
+    clone :: (&Self) -> GraphicsState {
+        return GraphicsState(
+            float_textures      = float_textures.clone()
+            spectrum_textures   = spectrum_textures.clone()
+            named_materials     = named_materials.clone()
+            float_textures_shared       = float_textures_shared
+            spectrum_textures_shared    = spectrum_textures_shared
+            named_materials_shared      = named_materials_shared
+        )
+    }
+}
+
+Pbrt :: struct {
+    current_transforms      := TransformSet()
+    active_transform_bits   : int = int.max
+
+    allocator   : ArenaAllocator
+    state       := ApiState.Options
+
+    scene                       := Option[Scene].None
+    named_coordinate_systems    := Map[string, TransformSet].new()
+    render_options              := RenderOptions()
+    graphics_state              := GraphicsState()
+
+    pushed_graphics_states          := Array[GraphicsState].new()
+    pushed_transforms               := Array[TransformSet].new()
+    pushed_active_transform_bits    := Array[int].new()
+}
+
+// public api
 impl Pbrt {
     new :: () -> Pbrt {
         return Pbrt(
@@ -33,34 +115,155 @@ impl Pbrt {
         )
     }
 
-    world_begin :: (&mut Self) {
+    world_begin :: (&mut Self) -> Result[(), String] {
         profile_function()
+        self.expect_state(.Options, "Trying to call 'world_begin()' but already in an active world")
         log("world_begin()")
+
+        state = .World
+
+        return Ok()
     }
 
-    world_end :: (&mut Self) {
+    world_end :: (&mut Self) -> Result[(), String] {
         profile_function()
+        self.expect_state(.World, "Can only call 'world_end()' after 'world_begin()'")
         log("world_end()")
+
+        if pushed_graphics_states.count() > 0 {
+            log_error("Missing 'attribute_end()'")
+            return Err(fmt.format("Missing 'attribute_end()'"))
+        }
+
+        if pushed_transforms.count() > 0 {
+            log_error("Missing 'transform_end()'")
+            return Err(fmt.format("Missing 'transform_end()'"))
+        }
+
+        integrator := try(render_options.make_integrator())
+        scene := render_options.make_scene()
+
+        integrator.get().render(scene.get())
+
+        // @todo: clean up
+        graphics_state = GraphicsState()
+        // transform_cache.clear()
+        state = .Options
+        // ImageTexture<Float, Float>::ClearCache();
+        // ImageTexture<RGBSpectrum, Spectrum>::ClearCache();
+        render_options = RenderOptions()
+
+        current_transforms = TransformSet()
+        active_transform_bits = int.max
+        // namedCoordinateSystems.erase(namedCoordinateSystems.begin(), namedCoordinateSystems.end());
+
+        return Ok()
     }
 
-    attribute_begin :: (&mut Self) {
+    attribute_begin :: (&mut Self) -> Result[(), String] {
         profile_function()
+        self.expect_state(.World, "Can only call 'attribute_begin()' in active world")
         log("attribute_begin()")
+
+        pushed_graphics_states.add(graphics_state.clone())
+        pushed_transforms.add(current_transforms)
+        pushed_active_transform_bits.add(active_transform_bits)
+
+        graphics_state.float_textures_shared = true
+        graphics_state.spectrum_textures_shared = true
+        graphics_state.named_materials_shared = true
+
+        return Ok()
     }
 
-    attribute_end :: (&mut Self) {
+    attribute_end :: (&mut Self) -> Result[(), String] {
         profile_function()
+        self.expect_state(.World, "Can only call 'attribute_end()' after 'attribute_begin()'")
         log("attribute_end()")
+
+        if pushed_graphics_states.count() == 0 {
+            log_error("Unmatched 'attribude_end()' encountered")
+            return Err(fmt.format("Unmatched 'attribude_end()' encountered"))
+        }
+
+        graphics_state          = pushed_graphics_states.pop()
+        current_transforms      = pushed_transforms.pop()
+        active_transform_bits   = pushed_active_transform_bits.pop()
+
+        return Ok()
+    }
+
+    look_at :: (&mut Self, eye: vec3, target: vec3, up: vec3) -> Result[(), String] {
+        profile_function()
+        self.expect_state(.Options, "Can only call 'look_at()' outside of 'world_begin()' and 'world_end()'")
+        log("look_at({}, {}, {})", [eye, target, up])
+
+        transform := Transform.look_at(eye, target, up)
+        for self.active_transforms() {
+            it *= &transform
+        }
+
+        return Ok()
+    }
+
+    camera :: (&mut Self, name: string, params: ParamSet) -> Result[(), String] {
+        profile_function()
+        self.expect_state(.Options, "Can only call 'camera()' outside of 'world_begin()' and 'world_end()'")
+        log("camera({}, {})", [name, &params])
+
+        render_options.camera_name = name.to_owned()
+        render_options.camera_params = params
+        render_options.camera_to_world = current_transforms.inverse()
+        named_coordinate_systems["camera"] = render_options.camera_to_world
+
+        return Ok()
+    }
+
+    sampler :: (&mut Self, name: string, params: ParamSet) -> Result[(), String] {
+        profile_function()
+        self.expect_state(.Options, "Can only call 'sampler()' outside of 'world_begin()' and 'world_end()'")
+        log("sampler({}, {})", [name, &params])
+
+        render_options.sampler_name = name.to_owned()
+        render_options.sampler_params = params
+
+        return Ok()
+    }
+
+    integrator :: (&mut Self, name: string, params: ParamSet) -> Result[(), String] {
+        profile_function()
+        self.expect_state(.Options, "Can only call 'integrator()' outside of 'world_begin()' and 'world_end()'")
+        log("integrator({}, {})", [name, &params])
+
+        render_options.integrator_name = name.to_owned()
+        render_options.integrator_params = params
+
+        return Ok()
+    }
+
+    film :: (&mut Self, name: string, params: ParamSet) -> Result[(), String] {
+        profile_function()
+        self.expect_state(.Options, "Can only call 'film()' outside of 'world_begin()' and 'world_end()'")
+        log("film({}, {})", [name, &params])
+
+        render_options.film_name = name.to_owned()
+        render_options.film_params = params
+
+        return Ok()
+    }
+}
+
+// helper functions
+impl Pbrt {
+    expect_state :: (self: &Self, state: ApiState, message: string, args: []^any = []) #macro {
+        if self.state != state {
+            log_error(message, args)
+            return Err(fmt.format(message, args))
+        }
     }
 
     active_transforms :: (&mut Self) -> ActiveTransformIterator {
         return ActiveTransformIterator(self)
-    }
-
-    look_at :: (&mut Self, eye: vec3, target: vec3, up: vec3) {
-        profile_function()
-        transform := Transform.look_at(eye, target, up)
-
     }
 }
 
@@ -70,12 +273,12 @@ ActiveTransformIterator :: struct {
 
 for_extension_active_transform_iterator :: (ati: ActiveTransformIterator, body: Code, by_ref: bool = false, mutable: bool = false) #for {
     mut it_index := 0
-    for i in 0 .. pbrt.current_transforms.length {
-        if (i | @bin_lsl(1) | @bin_and(ati.pbrt.active_transforms)) != 0 {
+    for i in 0 .. ati.pbrt.current_transforms.transforms.length {
+        if (i | @bin_lsl(1) | @bin_and(ati.pbrt.active_transform_bits)) != 0 {
             defer {
                 it_index += 1
             }
-            it : &mut Transform = ati.current_transforms[i]
+            it : &mut Transform = ati.pbrt.current_transforms.transforms[i]
             @insert(body, _break=break, _continue=continue)
         }
     }

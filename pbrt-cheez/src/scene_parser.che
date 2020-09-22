@@ -48,20 +48,20 @@ impl Parser {
 
                 .KwWorldBegin -> {
                     lexer.next_token()
-                    pbrt.world_begin()
+                    try(pbrt.world_begin())
                 }
                 .KwWorldEnd -> {
                     lexer.next_token()
-                    pbrt.world_end()
+                    try(pbrt.world_end())
                 }
 
                 .KwAttributeBegin -> {
                     lexer.next_token()
-                    pbrt.attribute_begin()
+                    try(pbrt.attribute_begin())
                 }
                 .KwAttributeEnd -> {
                     lexer.next_token()
-                    pbrt.attribute_end()
+                    try(pbrt.attribute_end())
                 }
 
                 .KwTranslate -> {
@@ -169,30 +169,9 @@ impl Parser {
             bool    -> Ok(try(expect(.BoolLiteral)).data.get_bool())
             int     -> Ok(try(expect(.NumberLiteral)).data.as_int())
             real    -> Ok(try(parse_number()))
-            vec2    -> {
-                result := vec2(
-                    x = try(parse_number())
-                    y = try(parse_number())
-                )
-                Ok(result)
-            }
-            vec3    -> {
-                result := vec3(
-                    x = try(parse_number())
-                    y = try(parse_number())
-                    z = try(parse_number())
-                )
-                Ok(result)
-            }
-            vec4    -> {
-                result := vec4(
-                    x = try(parse_number())
-                    y = try(parse_number())
-                    z = try(parse_number())
-                    w = try(parse_number())
-                )
-                Ok(result)
-            }
+            vec2    -> parse_vec2()
+            vec3    -> parse_vec3()
+            vec4    -> parse_vec4()
             String  -> Ok(try(expect(.StringLiteral)).data.get_string().to_owned())
             _       -> @static_assert(false, "Invalid type for parameter 'values': " + @typename(T))
         }
@@ -201,22 +180,11 @@ impl Parser {
     parse_look_at :: (&mut Self) -> Result[(), String] {
         try(expect(.KwLookAt))
 
-        mut eye := vec3()
-        eye.x = try(self.parse_number())
-        eye.y = try(self.parse_number())
-        eye.z = try(self.parse_number())
+        eye := try(parse_vec3())
+        target := try(parse_vec3())
+        up := try(parse_vec3())
 
-        mut look_at := vec3()
-        look_at.x = try(self.parse_number())
-        look_at.y = try(self.parse_number())
-        look_at.z = try(self.parse_number())
-
-        mut up := vec3()
-        up.x = try(self.parse_number())
-        up.y = try(self.parse_number())
-        up.z = try(self.parse_number())
-
-        // @todo
+        try(pbrt.look_at(eye, target, up))
 
         return Ok()
     }
@@ -225,7 +193,7 @@ impl Parser {
         try(expect(.KwCamera))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
-        // @todo
+        pbrt.camera(name, params)
         return Ok()
     }
 
@@ -233,14 +201,15 @@ impl Parser {
         try(expect(.KwSampler))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
-        // @todo
+        pbrt.sampler(name, params)
         return Ok()
     }
 
     parse_integrator :: (&mut Self) -> Result[(), String] {
         try(expect(.KwIntegrator))
         name := try(expect(.StringLiteral)).data.get_string()
-        // @todo
+        params := try(parse_param_set())
+        pbrt.integrator(name, params)
         return Ok()
     }
 
@@ -248,7 +217,7 @@ impl Parser {
         try(expect(.KwFilm))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
-        // @todo
+        pbrt.film(name, params)
         return Ok()
     }
 
@@ -284,6 +253,30 @@ impl Parser {
         params := try(parse_param_set())
         // @todo
         return Ok()
+    }
+
+    parse_vec2 :: (&mut Self) -> Result[vec2, String] {
+        return Ok(vec2(
+            x = try(parse_number())
+            y = try(parse_number())
+        ))
+    }
+
+    parse_vec3 :: (&mut Self) -> Result[vec3, String] {
+        return Ok(vec3(
+            x = try(parse_number())
+            y = try(parse_number())
+            z = try(parse_number())
+        ))
+    }
+
+    parse_vec4 :: (&mut Self) -> Result[vec4, String] {
+        return Ok(vec4(
+            x = try(parse_number())
+            y = try(parse_number())
+            z = try(parse_number())
+            w = try(parse_number())
+        ))
     }
 
     parse_number :: (&mut Self) -> Result[f32, String] {
@@ -365,22 +358,18 @@ impl Lexer {
     }
 
     peek_token :: (&mut Self) -> &Token {
-        // io.println("peek_token()")
         return match &peek {
             Some($tok) -> tok
 
             None -> {
                 tok := next_token()
-                // io.println("peek_token() 2")
                 peek = Some(tok)
-                // io.println("peek_token() 3")
                 &peek.Some
             }
         }
     }
 
     next_token :: (&mut Self) -> Token {
-        // io.println("next_token()")
         match peek {
             Some($t) -> {
                 peek = None
@@ -392,7 +381,6 @@ impl Lexer {
 
         t := read_token()
         
-        // io.println("next_token() 2")
         return t
     }
 
