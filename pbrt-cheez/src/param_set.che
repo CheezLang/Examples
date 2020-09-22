@@ -28,16 +28,6 @@ impl ParamSet {
         return ParamSet()
     }
 
-    replace :: (arr: &mut Array[Rc[ParamSetItem[$T]]], new_item: Rc[ParamSetItem[T]]) {
-        for &mut item in arr.slice_mut() {
-            if item.get().name.slice() == new_item.get().name.slice() {
-                *item = new_item
-                return
-            }
-        }
-        arr.add(new_item)
-    }
-
     remove :: (&mut Self, $T: type, name: string) -> bool {
         remove_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> bool {
             return match arr.index_of(name, (v, n) => v.get().name.slice() == n) {
@@ -60,7 +50,18 @@ impl ParamSet {
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
     }
+
     add :: (&mut Self, name: string, values: []$T) {
+        replace :: (arr: &mut Array[Rc[ParamSetItem[$T]]], new_item: Rc[ParamSetItem[T]]) {
+            for &mut item in arr.slice_mut() {
+                if item.get().name.slice() == new_item.get().name.slice() {
+                    *item = new_item
+                    return
+                }
+            }
+            arr.add(new_item)
+        }
+
         match T {
             bool    -> replace(&mut self.bools, ParamSetItem[T].new(name, values))
             int     -> replace(&mut self.ints, ParamSetItem[T].new(name, values))
@@ -69,6 +70,51 @@ impl ParamSet {
             vec3    -> replace(&mut self.vec3s, ParamSetItem[T].new(name, values))
             vec4    -> replace(&mut self.vec4s, ParamSetItem[T].new(name, values))
             String  -> replace(&mut self.strings, ParamSetItem[T].new(name, values))
+            _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
+        }
+    }
+
+    get :: (&mut Self, $T: type, name: string) -> Option[&T] {
+        get_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> Option[&T] {
+            for &mut item in arr.slice_mut() {
+                if item.get().name.slice() == name {
+                    @assert(item.get().values.count() == 1)
+                    return Some(item.get().values[0])
+                }
+            }
+            return None
+        }
+
+        return match T {
+            bool    -> get_impl(&self.bools, name)
+            int     -> get_impl(&self.ints, name)
+            real    -> get_impl(&self.floats, name)
+            vec2    -> get_impl(&self.vec2s, name)
+            vec3    -> get_impl(&self.vec3s, name)
+            vec4    -> get_impl(&self.vec4s, name)
+            String  -> get_impl(&self.strings, name)
+            _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
+        }
+    }
+
+    get_n :: (&mut Self, $T: type, name: string) -> Option[[]T] {
+        get_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> Option[[]T] {
+            for &mut item in arr.slice_mut() {
+                if item.get().name.slice() == name {
+                    return Some(item.get().values[..])
+                }
+            }
+            return None
+        }
+
+        return match T {
+            bool    -> get_impl(&self.bools, name)
+            int     -> get_impl(&self.ints, name)
+            real    -> get_impl(&self.floats, name)
+            vec2    -> get_impl(&self.vec2s, name)
+            vec3    -> get_impl(&self.vec3s, name)
+            vec4    -> get_impl(&self.vec4s, name)
+            String  -> get_impl(&self.strings, name)
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
     }

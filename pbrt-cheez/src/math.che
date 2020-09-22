@@ -8,4 +8,12 @@ vec2 :: Vector2[real]
 vec3 :: Vector3[real]
 vec4 :: Vector4[real]
 
-Spectrum :: struct {}
+CoefficientSpectrum :: trait(Samples: int) {
+    c : [Samples]real
+}
+
+RGBSpectrum :: struct CoefficientSpectrum[3] {
+
+}
+
+Spectrum :: RGBSpectrum

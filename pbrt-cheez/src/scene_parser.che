@@ -4,6 +4,7 @@ use import std.array
 use import std.printable
 use import std.mem.arena_allocator
 use import std.math
+use import std.rc
 
 mem :: import std.mem.allocator
 C   :: import std.c
@@ -37,8 +38,14 @@ impl Parser {
             param_set.add("test3", [vec2(5.3, -99)])
 
             io.formatln("{}", [&param_set])
+            io.formatln("{}", [param_set.get(vec2, "test3")])
+            io.formatln("{}", [param_set.get_n(real, "test2")])
+            io.formatln("{}", [param_set.get_n(bool, "test")])
             io.formatln("remove real test: {}", [param_set.remove(real, "test")])
             io.formatln("remove bool test: {}", [param_set.remove(bool, "test")])
+            io.formatln("{}", [param_set.get(vec2, "test3")])
+            io.formatln("{}", [param_set.get_n(real, "test2")])
+            io.formatln("{}", [param_set.get_n(bool, "test")])
         }
 
         loop {
@@ -49,7 +56,7 @@ impl Parser {
 
             match token.typ {
                 .KwLookAt -> try(parser.parse_look_at())
-                // .KwCamera -> try(parser.parse_camera())
+                .KwCamera -> try(parser.parse_camera())
 
                 .EOF -> break
                 .Unknown -> {
@@ -67,6 +74,88 @@ impl Parser {
         }
 
         return Ok(scene)
+    }
+
+    parse_param_set :: (&mut Self) -> Result[ParamSet, String] {
+        io.formatln("parse_param_set()")
+        param_set := ParamSet.new()
+        loop {
+            token := lexer.peek_token()
+            if token.typ != .StringLiteral then break
+            type_and_name := token.data.get_string()
+            lexer.next_token()
+
+
+            i_space := type_and_name.index_of(' ')
+            if i_space < 0 {
+                return Err(fmt.format("Invalid parameter set item descriptor: `"{}`"", [type_and_name]))
+            }
+            type_str := type_and_name[..i_space]
+            name := type_and_name[(i_space+1)..]
+
+            if type_str == "bool" {
+                args := try(parse_param_set_item_args(bool))
+                param_set.add(name, args[..])
+            } else if type_str == "integer" {
+                args := try(parse_param_set_item_args(int))
+                param_set.add(name, args[..])
+            } else if type_str == "float" {
+                args := try(parse_param_set_item_args(real))
+                param_set.add(name, args[..])
+            } else if type_str == "string" {
+                args := try(parse_param_set_item_args(String))
+                param_set.add(name, args[..])
+            } else if type_str == "point" or type_str == "vector" or type_str == "normal" {
+                args := try(parse_param_set_item_args(vec3))
+                param_set.add(name, args[..])
+            } else if type_str == "rgb" {
+                args := try(parse_param_set_item_args(vec3))
+                param_set.add(name, args[..])
+            }
+        }
+
+        return Ok(param_set)
+    }
+
+    parse_param_set_item_args :: (&mut Self, $T: type) -> Result[Array[T], String] {
+        io.formatln("parse_param_set_item_args({})", [@typename(T)])
+        result := Array[T].new()
+
+        mut token := lexer.peek_token()
+        if token.typ == .OpenBracket {
+            lexer.next_token()
+
+            loop {
+                token = lexer.peek_token()
+                if token.typ == .ClosingBracket then break
+
+                result.add(try(parse_param_set_item_arg(T)))
+            }
+        } else {
+            result.add(try(parse_param_set_item_arg(T)))
+        }
+
+        return Ok(result)
+    }
+
+    parse_param_set_item_arg :: (&mut Self, $T: type) -> Result[T, String] {
+        io.formatln("parse_param_set_item_arg({})", [@typename(T)])
+        return match T {
+            bool    -> Ok(try(expect(.BoolLiteral)).data.get_bool())
+            int     -> Ok(try(expect(.NumberLiteral)).data.as_int())
+            real    -> Ok(try(parse_number()))
+            // vec2    -> get_impl(&self.vec2s, name)
+            vec3    -> {
+                mut result := vec3()
+                result.x = try(parse_number())
+                result.y = try(parse_number())
+                result.z = try(parse_number())
+                Ok(result)
+            }
+            // vec4    -> get_impl(&self.vec4s, name)
+            String  -> Ok(try(expect(.StringLiteral)).data.get_string().to_owned())
+            _       -> @static_assert(false, "Invalid type for parameter 'values': " + @typename(T))
+        }
     }
 
     parse_look_at :: (&mut Self) -> Result[(), String] {
@@ -90,9 +179,13 @@ impl Parser {
         return Ok()
     }
 
-    // parse_camera :: (&mut Self) -> Result[(), String] {
+    parse_camera :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwCamera))
+        projection := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
 
-    // }
+        return Ok()
+    }
 
     parse_number :: (&mut Self) -> Result[f32, String] {
         token := lexer.next_token()
@@ -629,7 +722,13 @@ impl Lexer {
                     else if str == "Texture"         then TokenType.KwTexture
                     else if str == "Translate"       then TokenType.KwTranslate
                     else if str == "LightSource"     then TokenType.KwLightSource
-                    else token.typ
+                    else if str == "true" {
+                        token.data = .Bool(true)
+                        TokenType.BoolLiteral
+                    } else if str == "false" {
+                        token.data = .Bool(false)
+                        TokenType.BoolLiteral
+                    } else token.typ
             }
         }
     }
@@ -684,6 +783,37 @@ TokenData :: enum #copy {
     String  : string
     Integer : int
     Double  : double
+    Bool    : bool
+}
+
+impl TokenData {
+    get_bool :: (Self) -> bool {
+        @assert(self == .Bool)
+        return self.Bool
+    }
+
+    get_string :: (Self) -> string {
+        @assert(self == .String)
+        return self.String
+    }
+
+    as_int :: (Self) -> int {
+        return match self {
+            .Integer($i) -> i
+            .Double($d) -> int(d)
+            _ -> @assert(false)
+        }
+    }
+
+    get_int :: (Self) -> int {
+        @assert(self == .Integer)
+        return self.Integer
+    }
+
+    get_float :: (Self) -> f32 {
+        @assert(self == .Double)
+        return f32(self.Double)
+    }
 }
 
 impl Printable for Location {
@@ -749,6 +879,7 @@ TokenType :: enum #copy {
     EOF
     StringLiteral
     NumberLiteral
+    BoolLiteral
     Identifier
     Plus
     Minus
