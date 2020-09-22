@@ -79,6 +79,7 @@ impl ParamSet {
             for &mut item in arr.slice_mut() {
                 if item.get().name.slice() == name {
                     @assert(item.get().values.count() == 1)
+                    item.get_mut().used = true
                     return Some(item.get().values[0])
                 }
             }
@@ -101,6 +102,7 @@ impl ParamSet {
         get_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> Option[[]T] {
             for &mut item in arr.slice_mut() {
                 if item.get().name.slice() == name {
+                    item.get_mut().used = true
                     return Some(item.get().values[..])
                 }
             }
@@ -117,6 +119,28 @@ impl ParamSet {
             String  -> get_impl(&self.strings, name)
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
+    }
+
+    get_unused :: (&Self) -> Array[(typ: &TypeInfo, name: string)] {
+        collect_unused :: (arr: &Array[Rc[ParamSetItem[$T]]], result: &mut Array[(typ: &TypeInfo, name: string)]) {
+            for &v in arr[..] {
+                if !v.get().used {
+                    result.add((&*@type_info(T), v.get().name.slice()))
+                }
+            }
+        }
+
+        mut result := Array[(typ: &TypeInfo, name: string)].new()
+        collect_unused(&bools, &mut result)
+        collect_unused(&ints, &mut result)
+        collect_unused(&floats, &mut result)
+        collect_unused(&vec2s, &mut result)
+        collect_unused(&vec3s, &mut result)
+        collect_unused(&vec4s, &mut result)
+        collect_unused(&strings, &mut result)
+        collect_unused(&spectra, &mut result)
+        collect_unused(&textures, &mut result)
+        return result
     }
 }
 

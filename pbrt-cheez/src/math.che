@@ -1,4 +1,5 @@
 use import std.math
+use import std.matrix
 
 #export_scope
 
@@ -7,6 +8,7 @@ real :: f32
 vec2 :: Vector2[real]
 vec3 :: Vector3[real]
 vec4 :: Vector4[real]
+mat4 :: Matrix4[real]
 
 CoefficientSpectrum :: trait(Samples: int) {
     c : [Samples]real
@@ -17,3 +19,46 @@ RGBSpectrum :: struct CoefficientSpectrum[3] {
 }
 
 Spectrum :: RGBSpectrum
+
+Transform :: struct {
+    m       := mat4.id()
+    m_inv   := mat4.id()
+}
+
+impl Transform {
+    look_at :: (eye: vec3, target: vec3, mut up: vec3) -> Transform {
+        up.normalize()
+
+        camera_to_world := mat4()
+
+        // Initialize fourth column of viewing matrix
+        *camera_to_world[(0, 3)] = eye.x
+        *camera_to_world[(1, 3)] = eye.y
+        *camera_to_world[(2, 3)] = eye.z
+        *camera_to_world[(3, 3)] = 1
+
+        // Initialize first three columns of viewing matrix
+        dir := (target - eye).normalized()
+
+        mut right := dir.cross(up)
+        if right.magsq() == 0 {
+            @assert(false)
+        }
+
+        right.normalize()
+        new_up := right.cross(dir)
+        *camera_to_world[(0, 0)] = right.x
+        *camera_to_world[(1, 0)] = right.y
+        *camera_to_world[(2, 0)] = right.z
+        *camera_to_world[(3, 0)] = 0.0
+        *camera_to_world[(0, 1)] = new_up.x
+        *camera_to_world[(1, 1)] = new_up.y
+        *camera_to_world[(2, 1)] = new_up.z
+        *camera_to_world[(3, 1)] = 0.0
+        *camera_to_world[(0, 2)] = dir.x
+        *camera_to_world[(1, 2)] = dir.y
+        *camera_to_world[(2, 2)] = dir.z
+        *camera_to_world[(3, 2)] = 0.0
+        return Transform(camera_to_world.inverse(), camera_to_world)
+    }
+}

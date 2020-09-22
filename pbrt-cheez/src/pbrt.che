@@ -1,0 +1,82 @@
+use import std.mem.arena_allocator
+use import std.array
+use import std.string
+use import std.profiling
+
+mem :: import std.mem.allocator
+fmt :: import std.fmt
+io  :: import std.io
+
+use import scene
+use import math
+use import param_set
+use import core
+
+#export_scope
+
+Pbrt :: struct {
+    allocator : ArenaAllocator
+
+    // global settings
+    current_transforms  : [2]Transform = [Transform(), Transform()]
+    active_transforms   : int = int.max
+
+    // current scene
+    scene := Option[Scene].None
+
+}
+
+impl Pbrt {
+    new :: () -> Pbrt {
+        return Pbrt(
+            allocator = ArenaAllocator.new(1024*1024)
+        )
+    }
+
+    world_begin :: (&mut Self) {
+        profile_function()
+        log("world_begin()")
+    }
+
+    world_end :: (&mut Self) {
+        profile_function()
+        log("world_end()")
+    }
+
+    attribute_begin :: (&mut Self) {
+        profile_function()
+        log("attribute_begin()")
+    }
+
+    attribute_end :: (&mut Self) {
+        profile_function()
+        log("attribute_end()")
+    }
+
+    active_transforms :: (&mut Self) -> ActiveTransformIterator {
+        return ActiveTransformIterator(self)
+    }
+
+    look_at :: (&mut Self, eye: vec3, target: vec3, up: vec3) {
+        profile_function()
+        transform := Transform.look_at(eye, target, up)
+
+    }
+}
+
+ActiveTransformIterator :: struct {
+    pbrt : &mut Pbrt
+}
+
+for_extension_active_transform_iterator :: (ati: ActiveTransformIterator, body: Code, by_ref: bool = false, mutable: bool = false) #for {
+    mut it_index := 0
+    for i in 0 .. pbrt.current_transforms.length {
+        if (i | @bin_lsl(1) | @bin_and(ati.pbrt.active_transforms)) != 0 {
+            defer {
+                it_index += 1
+            }
+            it : &mut Transform = ati.current_transforms[i]
+            @insert(body, _break=break, _continue=continue)
+        }
+    }
+}

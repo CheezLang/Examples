@@ -1,12 +1,16 @@
 use import std.array
 use import std.string
+use import std.profiling
 
 fmt :: import std.fmt
 io  :: import std.io
+fs  :: import std.io.fs
 
 clap :: import clap.clap
 
-use import scene
+use import pbrt
+use import scene_parser
+use import core
 
 Arguments :: struct {
     #help("Number of threads to use while rendering")
@@ -17,9 +21,16 @@ Arguments :: struct {
 
     #help("Path to scene file (.scn)")
     scene : String
+
+    #help("Enable logging")
+    log := false
 }
 
 Main :: () {
+    Instrumentor.init(thread_safe = true)
+    Instrumentor.get().begin_session("pbrt-cheez", "pbrt-cheez.json")
+    defer Instrumentor.get().end_session()
+
     match app_main() {
         Ok() -> {}
         Err($msg) -> {
@@ -31,10 +42,17 @@ Main :: () {
 }
 
 app_main :: () -> Result[(), String] {
+    profile_function()
     match clap.parse_cmd_arguments(Arguments) {
         Ok($args) -> {
             io.formatln("{}", [&args])
-            scene := try(Scene.from_file(args.scene.slice()))
+            enable_logging = args.log
+
+            text := try(fs.read_file(args.scene.slice()))
+
+            mut pbrt := Pbrt.new()
+
+            try(Parser.parse(text.slice(), &mut pbrt))
         }
         Err(_) -> {
             help := clap.get_help_message(@type_info(Arguments))

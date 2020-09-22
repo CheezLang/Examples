@@ -1,0 +1,27 @@
+use import std.profiling
+use import std.thread
+
+io  :: import std.io
+fmt :: import std.fmt
+
+#export_scope
+
+mut enable_logging := false
+
+profile_function :: () #macro #transparent {
+    _ := Timer.start(@function_signature())
+}
+
+log_error :: (msg: string, args: []^any = []) {
+    thread_id := Thread.current().id
+    message := fmt.format(msg, args)
+    io.formatln("[{}] [ERROR] {}", [thread_id, message.slice()])
+}
+
+log :: (msg: string, args: []^any = []) {
+    if enable_logging {
+        thread_id := Thread.current().id
+        message := fmt.format(msg, args)
+        io.formatln("[{}] {}", [thread_id, message.slice()])
+    }
+}

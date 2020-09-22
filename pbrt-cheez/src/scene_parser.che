@@ -5,58 +5,74 @@ use import std.printable
 use import std.mem.arena_allocator
 use import std.math
 use import std.rc
+use import std.profiling
 
 mem :: import std.mem.allocator
 C   :: import std.c
 io  :: import std.io
 fmt :: import std.fmt
 
+use import pbrt
 use import scene
 use import param_set
 use import math
+use import core
 
 #export_scope
 
 Parser :: struct {
     lexer       : &mut Lexer
-    allocator   : &mut mem.Allocator
-    scene       : &mut Scene
+    pbrt        : &mut Pbrt
 }
 
 impl Parser {
-    parse :: (text: string, allocator: ArenaAllocator) -> Result[Scene, String] {
-        mut scene := Scene(allocator)
+    parse :: (text: string, pbrt: &mut Pbrt) -> Result[(), String] {
+        profile_function()
         mut lexer := Lexer.from_string(text)
 
-        parser := Parser(&mut lexer, &mut scene.allocator, &mut scene)
-
-
-        {
-            param_set := ParamSet.new()
-            param_set.add("test", [true, false])
-            param_set.add("test2", [1.0f, 0.9f])
-            param_set.add("test3", [vec2(5.3, -99)])
-
-            io.formatln("{}", [&param_set])
-            io.formatln("{}", [param_set.get(vec2, "test3")])
-            io.formatln("{}", [param_set.get_n(real, "test2")])
-            io.formatln("{}", [param_set.get_n(bool, "test")])
-            io.formatln("remove real test: {}", [param_set.remove(real, "test")])
-            io.formatln("remove bool test: {}", [param_set.remove(bool, "test")])
-            io.formatln("{}", [param_set.get(vec2, "test3")])
-            io.formatln("{}", [param_set.get_n(real, "test2")])
-            io.formatln("{}", [param_set.get_n(bool, "test")])
-        }
+        parser := Parser(&mut lexer, pbrt)
 
         loop {
-            // io.println("peek")
             token := lexer.peek_token()
-            // io.println("peek 2")
-            io.formatln("{}", [token])
 
             match token.typ {
                 .KwLookAt -> try(parser.parse_look_at())
                 .KwCamera -> try(parser.parse_camera())
+                .KwSampler -> try(parser.parse_sampler())
+                .KwIntegrator -> try(parser.parse_integrator())
+                .KwFilm -> try(parser.parse_film())
+                .KwLightSource -> try(parser.parse_light_source())
+                .KwMaterial -> try(parser.parse_material())
+                .KwShape -> try(parser.parse_shape())
+                .KwTexture -> try(parser.parse_texture())
+
+                .KwWorldBegin -> {
+                    lexer.next_token()
+                    pbrt.world_begin()
+                }
+                .KwWorldEnd -> {
+                    lexer.next_token()
+                    pbrt.world_end()
+                }
+
+                .KwAttributeBegin -> {
+                    lexer.next_token()
+                    pbrt.attribute_begin()
+                }
+                .KwAttributeEnd -> {
+                    lexer.next_token()
+                    pbrt.attribute_end()
+                }
+
+                .KwTranslate -> {
+                    lexer.next_token()
+                    translation := vec3(
+                        x = try(parser.parse_number())
+                        y = try(parser.parse_number())
+                        z = try(parser.parse_number())
+                    )
+                    // @todo
+                }
 
                 .EOF -> break
                 .Unknown -> {
@@ -73,11 +89,10 @@ impl Parser {
             }
         }
 
-        return Ok(scene)
+        return Ok()
     }
 
     parse_param_set :: (&mut Self) -> Result[ParamSet, String] {
-        io.formatln("parse_param_set()")
         param_set := ParamSet.new()
         loop {
             token := lexer.peek_token()
@@ -110,7 +125,17 @@ impl Parser {
                 param_set.add(name, args[..])
             } else if type_str == "rgb" {
                 args := try(parse_param_set_item_args(vec3))
+                // @todo
                 param_set.add(name, args[..])
+            } else if type_str == "blackbody" {
+                args := try(parse_param_set_item_args(real))
+                // @todo
+                param_set.add(name, args[..])
+            } else if type_str == "texture" {
+                args := try(parse_param_set_item_args(String))
+                param_set.add(name, args[..])
+            } else {
+                return Err(fmt.format("Unknown type '{}'", [type_str]))
             }
         }
 
@@ -118,7 +143,6 @@ impl Parser {
     }
 
     parse_param_set_item_args :: (&mut Self, $T: type) -> Result[Array[T], String] {
-        io.formatln("parse_param_set_item_args({})", [@typename(T)])
         result := Array[T].new()
 
         mut token := lexer.peek_token()
@@ -131,6 +155,8 @@ impl Parser {
 
                 result.add(try(parse_param_set_item_arg(T)))
             }
+
+            try(expect(.ClosingBracket))
         } else {
             result.add(try(parse_param_set_item_arg(T)))
         }
@@ -139,20 +165,34 @@ impl Parser {
     }
 
     parse_param_set_item_arg :: (&mut Self, $T: type) -> Result[T, String] {
-        io.formatln("parse_param_set_item_arg({})", [@typename(T)])
         return match T {
             bool    -> Ok(try(expect(.BoolLiteral)).data.get_bool())
             int     -> Ok(try(expect(.NumberLiteral)).data.as_int())
             real    -> Ok(try(parse_number()))
-            // vec2    -> get_impl(&self.vec2s, name)
-            vec3    -> {
-                mut result := vec3()
-                result.x = try(parse_number())
-                result.y = try(parse_number())
-                result.z = try(parse_number())
+            vec2    -> {
+                result := vec2(
+                    x = try(parse_number())
+                    y = try(parse_number())
+                )
                 Ok(result)
             }
-            // vec4    -> get_impl(&self.vec4s, name)
+            vec3    -> {
+                result := vec3(
+                    x = try(parse_number())
+                    y = try(parse_number())
+                    z = try(parse_number())
+                )
+                Ok(result)
+            }
+            vec4    -> {
+                result := vec4(
+                    x = try(parse_number())
+                    y = try(parse_number())
+                    z = try(parse_number())
+                    w = try(parse_number())
+                )
+                Ok(result)
+            }
             String  -> Ok(try(expect(.StringLiteral)).data.get_string().to_owned())
             _       -> @static_assert(false, "Invalid type for parameter 'values': " + @typename(T))
         }
@@ -161,29 +201,88 @@ impl Parser {
     parse_look_at :: (&mut Self) -> Result[(), String] {
         try(expect(.KwLookAt))
 
-        mut eye := Vector3[float]()
+        mut eye := vec3()
         eye.x = try(self.parse_number())
         eye.y = try(self.parse_number())
         eye.z = try(self.parse_number())
 
-        mut look_at := Vector3[float]()
+        mut look_at := vec3()
         look_at.x = try(self.parse_number())
         look_at.y = try(self.parse_number())
         look_at.z = try(self.parse_number())
 
-        mut up := Vector3[float]()
+        mut up := vec3()
         up.x = try(self.parse_number())
         up.y = try(self.parse_number())
         up.z = try(self.parse_number())
+
+        // @todo
 
         return Ok()
     }
 
     parse_camera :: (&mut Self) -> Result[(), String] {
         try(expect(.KwCamera))
-        projection := try(expect(.StringLiteral)).data.get_string()
+        name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
 
+    parse_sampler :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwSampler))
+        name := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
+
+    parse_integrator :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwIntegrator))
+        name := try(expect(.StringLiteral)).data.get_string()
+        // @todo
+        return Ok()
+    }
+
+    parse_film :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwFilm))
+        name := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
+
+    parse_light_source :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwLightSource))
+        name := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
+
+    parse_material :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwMaterial))
+        name := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
+
+    parse_shape :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwShape))
+        name := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
+        return Ok()
+    }
+
+    parse_texture :: (&mut Self) -> Result[(), String] {
+        try(expect(.KwTexture))
+        name := try(expect(.StringLiteral)).data.get_string()
+        color := try(expect(.StringLiteral)).data.get_string()
+        typ := try(expect(.StringLiteral)).data.get_string()
+        params := try(parse_param_set())
+        // @todo
         return Ok()
     }
 
