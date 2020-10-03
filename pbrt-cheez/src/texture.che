@@ -1,0 +1,190 @@
+use import std.rc
+use import std.string
+
+io :: import std.io
+fmt :: import std.fmt
+
+use import math
+use import spectrum
+use import param_set
+
+#export_scope
+
+Interaction :: trait {
+    p     : vec3
+    time  : real
+    error : vec3
+    wo    : vec3
+    n     : vec3
+    // medium_interface : MediumInterface // @todo
+}
+
+SurfaceInteraction :: struct Interaction {
+    uv   : vec2
+    dpdu : vec3
+    dpdv : vec3
+    dndu : vec3
+    dndv : vec3
+
+    // @todo
+    /*
+    shape : ^Shape = null
+    shading : struct {
+        n : vec3
+        dpdu : vec3
+        dpdv : vec3
+        dndu : vec3
+        dndv : vec3
+    }
+    primitive : ^Primitive = null
+    bsdf : ^BSDF = null
+    bssrdf : ^BSSRDF = null
+    */
+
+    dpdx : vec3
+    dpdy : vec3
+
+    dudx : real = 0
+    dvdx : real = 0
+    dudy : real = 0
+    dvdy : real = 0
+
+    face_index : i32 = 0
+}
+
+TextureMapping2D :: trait {
+    map :: (&Self, interaction: &SurfaceInteraction, dx: &mut vec2, dy: &mut vec2) -> vec2;
+}
+
+UVMapping2D :: struct {
+    su : real
+    sv : real
+    du : real
+    dv : real
+}
+
+impl TextureMapping2D for UVMapping2D {
+    map :: (&Self, si: &SurfaceInteraction, dx: &mut vec2, dy: &mut vec2) -> vec2 {
+        *dx = vec2(su * si.dudx, sv * si.dvdx)
+        *dy = vec2(su * si.dudy, sv * si.dvdy)
+        return vec2(su * si.uv.x + du, sv * si.uv.y + dv)
+    }
+}
+
+Texture :: trait(T: type) {
+    evaluate :: (&Self, interaction: &SurfaceInteraction) -> T;
+}
+
+ConstantTexture :: struct(T: type) {
+    value : T
+}
+
+impl(T: type) ConstantTexture[T] {
+    new :: (value: T) -> Self {
+        return Self(value)
+    }
+
+    make_float :: (tex_to_world: &Transform, params: &TextureParams) -> Result[Rc[Texture[real]], String] {
+        value := params.get(real, "value").map((v: &real) => *v).unwrap_or(1.0f)
+        return Ok(Rc[Texture[real]].new(ConstantTexture[real].new(value)))
+    }
+
+    make_spectrum :: (tex_to_world: &Transform, params: &TextureParams) -> Result[Rc[Texture[Spectrum]], String] {
+        value := params.get(Spectrum, "value").map((v: &Spectrum) => *v).unwrap_or(Spectrum.new(1.0f))
+        return Ok(Rc[Texture[Spectrum]].new(ConstantTexture[Spectrum].new(value)))
+    }
+}
+
+impl(T: type) Texture[T] for ConstantTexture[T] {
+    evaluate :: (&Self, interaction: &SurfaceInteraction) -> T {
+        return self.value
+    }
+}
+
+AAMethod :: enum #copy {
+    None
+    ClosedForm
+}
+
+Checkerboard2DTexture :: struct(T: type) {
+    tex1        : Rc[Texture[T]]
+    tex2        : Rc[Texture[T]]
+    mapping     : Rc[TextureMapping2D]
+    aa_method   : AAMethod
+}
+
+impl(T: type) Checkerboard2DTexture[T] {
+    make_float :: (tex_to_world: &Transform, params: &TextureParams) -> Result[Rc[Texture[real]], String] {
+        tex1 := params.get_float_texture("tex1", 1.0f)
+        tex2 := params.get_float_texture("tex2", 0.0f)
+
+        return make(real, tex_to_world, params, tex1, tex2)
+    }
+
+    make_spectrum :: (tex_to_world: &Transform, params: &TextureParams) -> Result[Rc[Texture[Spectrum]], String] {
+        tex1 := params.get_spectrum_texture("tex1", Spectrum.new(1.0f))
+        tex2 := params.get_spectrum_texture("tex2", Spectrum.new(0.0f))
+
+        return make(Spectrum, tex_to_world, params, tex1, tex2)
+    }
+
+    make :: ($T: type, tex_to_world: &Transform, params: &TextureParams, tex1: Rc[Texture[T]], tex2: Rc[Texture[T]]) -> Result[Rc[Texture[T]], String] {
+        dim := params.get(int, "dimension").map((v: &int) => *v).unwrap_or(2)
+        if dim != 2 {
+            return Err(fmt.format("{} dimensional checkerboard texture not supported", [dim]))
+        }
+
+        if dim == 2 {
+            mapping_type := params.get(String, "mapping").map((v: &String) => v.slice()).unwrap_or("uv")
+            mapping : Rc[TextureMapping2D] = if mapping_type == "uv" {
+                su := params.get(real, "uscale").map((v: &real) => *v).unwrap_or(1.0f)
+                sv := params.get(real, "vscale").map((v: &real) => *v).unwrap_or(1.0f)
+                du := params.get(real, "udelta").map((v: &real) => *v).unwrap_or(0.0f)
+                dv := params.get(real, "vdelta").map((v: &real) => *v).unwrap_or(0.0f)
+                Rc[TextureMapping2D].new(UVMapping2D(su, sv, du, dv))
+            } else {
+                return Err(fmt.format("2D texture mapping '{}' unknown", [mapping_type]))
+            }
+
+            aa := params.get(String, "aamode").map((v: &String) => v.slice()).unwrap_or("none") // @todo: set default to closed form when it's implemented
+            aa_method := if aa == "none" {
+                AAMethod.None
+            } else if aa == "closedform" {
+                AAMethod.ClosedForm
+            } else {
+                return Err(fmt.format("Antialiasing mode '{}' not understood by Checkerboard2DTexture", [aa]))
+            }
+
+            return Ok(Rc[Texture[T]].new(Checkerboard2DTexture[T](
+                tex1        = tex1
+                tex2        = tex2
+                mapping     = mapping
+                aa_method   = aa_method
+            )))
+        }
+
+        @assert(false)
+        return Err("".to_owned())
+    }
+}
+
+impl(T: type) Texture[T] for Checkerboard2DTexture[T] {
+    evaluate :: (&Self, si: &SurfaceInteraction) -> T {
+        mut dstdx := vec2()
+        mut dstdy := vec2()
+        st := self.mapping.get().map(si, &mut dstdx, &mut dstdy)
+        return match aa_method {
+            .None -> if (int(st.x.floor()) + int(st.y.floor())) % 2 == 0 {
+                self.tex1.get().evaluate(si)
+            } else {
+                self.tex2.get().evaluate(si)
+            }
+
+            .ClosedForm -> {
+                io.formatln("@TODO: implement Checkerboard2DTexture.evaluate with .ClosedForm")
+                @assert(false)
+                self.tex1.get().evaluate(si)
+            }
+        }
+    }
+}

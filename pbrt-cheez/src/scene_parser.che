@@ -36,42 +36,65 @@ impl Parser {
             token := lexer.peek_token()
 
             match token.typ {
-                .KwLookAt -> try(parser.parse_look_at())
-                .KwCamera -> try(parser.parse_camera())
-                .KwSampler -> try(parser.parse_sampler())
-                .KwIntegrator -> try(parser.parse_integrator())
-                .KwFilm -> try(parser.parse_film())
-                .KwLightSource -> try(parser.parse_light_source())
-                .KwMaterial -> try(parser.parse_material())
-                .KwShape -> try(parser.parse_shape())
-                .KwTexture -> try(parser.parse_texture())
-
-                .KwWorldBegin -> {
-                    lexer.next_token()
-                    try(pbrt.world_begin())
-                }
-                .KwWorldEnd -> {
-                    lexer.next_token()
-                    try(pbrt.world_end())
-                }
-
-                .KwAttributeBegin -> {
-                    lexer.next_token()
-                    try(pbrt.attribute_begin())
-                }
-                .KwAttributeEnd -> {
-                    lexer.next_token()
-                    try(pbrt.attribute_end())
-                }
-
-                .KwTranslate -> {
-                    lexer.next_token()
-                    translation := vec3(
-                        x = try(parser.parse_number())
-                        y = try(parser.parse_number())
-                        z = try(parser.parse_number())
-                    )
-                    // @todo
+                .Identifier -> {
+                    cmd := token.data.get_string()
+                    if cmd == "LookAt"           then try(parser.parse_look_at())
+                    else if cmd == "Camera"      then try(parser.parse_camera())
+                    else if cmd == "Sampler"     then try(parser.parse_sampler())
+                    else if cmd == "Integrator"  then try(parser.parse_integrator())
+                    else if cmd == "Film"        then try(parser.parse_film())
+                    else if cmd == "LightSource" then try(parser.parse_light_source())
+                    else if cmd == "Material"    then try(parser.parse_material())
+                    else if cmd == "Shape"       then try(parser.parse_shape())
+                    else if cmd == "Texture"     then try(parser.parse_texture())
+                    else if cmd == "WorldBegin" {
+                        lexer.next_token()
+                        try(pbrt.world_begin())
+                    } else if cmd == "WorldEnd" {
+                        lexer.next_token()
+                        try(pbrt.world_end())
+                    } else if cmd == "AttributeBegin" {
+                        lexer.next_token()
+                        try(pbrt.attribute_begin())
+                    } else if cmd == "AttributeEnd" {
+                        lexer.next_token()
+                        try(pbrt.attribute_end())
+                    } else if cmd == "TransformBegin" {
+                        lexer.next_token()
+                        try(pbrt.transform_begin())
+                    } else if cmd == "TransformEnd" {
+                        lexer.next_token()
+                        try(pbrt.transform_end())
+                    } else if cmd == "ActiveTransformAll" {
+                        lexer.next_token()
+                        try(pbrt.active_transform_all())
+                    } else if cmd == "ActiveTransformStartTime" {
+                        lexer.next_token()
+                        try(pbrt.active_transform_start_time())
+                    } else if cmd == "ActiveTransformEndTime" {
+                        lexer.next_token()
+                        try(pbrt.active_transform_end_time())
+                    } else if cmd == "Transform" {
+                        lexer.next_token()
+                        m := try(parser.parse_numbers([16]real))
+                        try(pbrt.transform(mat4(m)))
+                    } else if cmd == "ConcatTransform" {
+                        lexer.next_token()
+                        m := try(parser.parse_numbers([16]real))
+                        try(pbrt.concat_transform(mat4(m)))
+                    } else if cmd == "Translate" {
+                        lexer.next_token()
+                        translation := try(parser.parse_vec3())
+                        try(pbrt.translate(translation))
+                    } else if cmd == "CoordinateSystem" {
+                        lexer.next_token()
+                        name := try(parser.parse_string())
+                        try(pbrt.coordinate_system(name))
+                    } else if cmd == "CoordSysTransform" {
+                        lexer.next_token()
+                        name := try(parser.parse_string())
+                        try(pbrt.coord_sys_transform(name))
+                    }
                 }
 
                 .EOF -> break
@@ -125,8 +148,7 @@ impl Parser {
                 param_set.add(name, args[..])
             } else if type_str == "rgb" {
                 args := try(parse_param_set_item_args(vec3))
-                // @todo
-                param_set.add(name, args[..])
+                param_set.add_rgb_spectrum(name, args[..])
             } else if type_str == "blackbody" {
                 args := try(parse_param_set_item_args(real))
                 // @todo
@@ -178,7 +200,7 @@ impl Parser {
     }
 
     parse_look_at :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwLookAt))
+        try(expect_keyword("LookAt"))
 
         eye := try(parse_vec3())
         target := try(parse_vec3())
@@ -190,7 +212,7 @@ impl Parser {
     }
 
     parse_camera :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwCamera))
+        try(expect_keyword("Camera"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         pbrt.camera(name, params)
@@ -198,7 +220,7 @@ impl Parser {
     }
 
     parse_sampler :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwSampler))
+        try(expect_keyword("Sampler"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         pbrt.sampler(name, params)
@@ -206,7 +228,7 @@ impl Parser {
     }
 
     parse_integrator :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwIntegrator))
+        try(expect_keyword("Integrator"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         pbrt.integrator(name, params)
@@ -214,7 +236,7 @@ impl Parser {
     }
 
     parse_film :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwFilm))
+        try(expect_keyword("Film"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         pbrt.film(name, params)
@@ -222,7 +244,7 @@ impl Parser {
     }
 
     parse_light_source :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwLightSource))
+        try(expect_keyword("LightSource"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         // @todo
@@ -230,7 +252,7 @@ impl Parser {
     }
 
     parse_material :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwMaterial))
+        try(expect_keyword("Material"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         // @todo
@@ -238,7 +260,7 @@ impl Parser {
     }
 
     parse_shape :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwShape))
+        try(expect_keyword("Shape"))
         name := try(expect(.StringLiteral)).data.get_string()
         params := try(parse_param_set())
         // @todo
@@ -246,12 +268,12 @@ impl Parser {
     }
 
     parse_texture :: (&mut Self) -> Result[(), String] {
-        try(expect(.KwTexture))
-        name := try(expect(.StringLiteral)).data.get_string()
-        color := try(expect(.StringLiteral)).data.get_string()
-        typ := try(expect(.StringLiteral)).data.get_string()
-        params := try(parse_param_set())
-        // @todo
+        try(expect_keyword("Texture"))
+        name := try(self.parse_string())
+        typ := try(self.parse_string())
+        tex_name := try(self.parse_string())
+        params := try(self.parse_param_set())
+        try(pbrt.texture(name, typ, tex_name, params))
         return Ok()
     }
 
@@ -279,10 +301,20 @@ impl Parser {
         ))
     }
 
-    parse_number :: (&mut Self) -> Result[f32, String] {
+    parse_numbers :: (&mut Self, $T: type) -> Result[T, String] {
+        try(expect(.OpenBracket))
+        result : T = default
+        for i in 0 .. result.length {
+            *result[i] = try(parse_number())
+        }
+        try(expect(.ClosingBracket))
+        return Ok(result)
+    }
+
+    parse_number :: (&mut Self) -> Result[real, String] {
         token := lexer.next_token()
         return match token.typ {
-            .NumberLiteral -> Ok(get_number_f32(&token))
+            .NumberLiteral -> Ok(get_number_real(&token))
 
             .Minus -> {
                 num := try(self.parse_number())
@@ -298,18 +330,31 @@ impl Parser {
         }
     }
 
-    get_number_f32 :: (token: &Token) -> f32 {
+    get_number_real :: (token: &Token) -> real {
         return match token.data {
-            .Integer($i) -> f32(i)
-            .Double($d) -> f32(d)
+            .Integer($i) -> real(i)
+            .Double($d) -> real(d)
             _ -> @assert(false)
         }
+    }
+
+    parse_string :: (&mut Self) -> Result[string, String] {
+        token := try(expect(.StringLiteral))
+        return Ok(token.data.get_string())
+    }
+
+    expect_keyword :: (&mut Self, name: string) -> Result[Token, String] {
+        token := lexer.next_token()
+        if token.typ != .Identifier or token.data.get_string() != name {
+            return Err(fmt.format("Unexpected {} ({}), expected: {}", [token.typ, token.data, name]))
+        }
+        return Ok(token)
     }
 
     expect :: (&mut Self, typ: TokenType) -> Result[Token, String] {
         token := lexer.next_token()
         if token.typ != typ {
-            return Err(fmt.format("Unexpected {}, expected: ", [token.typ, typ]))
+            return Err(fmt.format("Unexpected {}, expected: {}", [token.typ, typ]))
         }
         return Ok(token)
     }
@@ -425,7 +470,15 @@ impl Lexer {
 
             $x, _ if is_ident_begin(x) -> {
                 parse_identifier(&token, TokenType.Identifier)
-                check_keywords(&token)
+
+                str := token.data.get_string()
+                if str == "true" {
+                    token.data = .Bool(true)
+                    token.typ = .BoolLiteral
+                } else if str == "false" {
+                    token.data = .Bool(false)
+                    token.typ = .BoolLiteral
+                }
             }
 
             // number literal
@@ -790,35 +843,6 @@ impl Lexer {
             location.column += 1
         }
     }
-
-    check_keywords :: (&Self, token: &mut Token) {
-        match token.data {
-            TokenData.String($str) -> {
-                token.typ =
-                    if      str == "LookAt"          then TokenType.KwLookAt
-                    else if str == "Camera"          then TokenType.KwCamera
-                    else if str == "Sampler"         then TokenType.KwSampler
-                    else if str == "Integrator"      then TokenType.KwIntegrator
-                    else if str == "Film"            then TokenType.KwFilm
-                    else if str == "WorldBegin"      then TokenType.KwWorldBegin
-                    else if str == "WorldEnd"        then TokenType.KwWorldEnd
-                    else if str == "AttributeBegin"  then TokenType.KwAttributeBegin
-                    else if str == "AttributeEnd"    then TokenType.KwAttributeEnd
-                    else if str == "Shape"           then TokenType.KwShape
-                    else if str == "Material"        then TokenType.KwMaterial
-                    else if str == "Texture"         then TokenType.KwTexture
-                    else if str == "Translate"       then TokenType.KwTranslate
-                    else if str == "LightSource"     then TokenType.KwLightSource
-                    else if str == "true" {
-                        token.data = .Bool(true)
-                        TokenType.BoolLiteral
-                    } else if str == "false" {
-                        token.data = .Bool(false)
-                        TokenType.BoolLiteral
-                    } else token.typ
-            }
-        }
-    }
 }
 
 // token
@@ -940,20 +964,6 @@ impl Printable for TokenType {
             .Period             -> "Period"
             .OpenBracket        -> "OpenBracket"
             .ClosingBracket     -> "ClosingBracket"
-            .KwLookAt           -> "LookAt"
-            .KwCamera           -> "Camera"
-            .KwSampler          -> "Sampler"
-            .KwIntegrator       -> "Integrator"
-            .KwFilm             -> "Film"
-            .KwWorldBegin       -> "WorldBegin"
-            .KwWorldEnd         -> "WorldEnd"
-            .KwAttributeBegin   -> "AttributeBegin"
-            .KwAttributeEnd     -> "AttributeEnd"
-            .KwShape            -> "Shape"
-            .KwMaterial         -> "Material"
-            .KwTexture          -> "Texture"
-            .KwTranslate        -> "Translate"
-            .KwLightSource      -> "LightSource"
 
             _ -> @assert(false)
         })
@@ -973,21 +983,6 @@ TokenType :: enum #copy {
     Period
     OpenBracket
     ClosingBracket
-
-    KwLookAt
-    KwCamera
-    KwSampler
-    KwIntegrator
-    KwFilm
-    KwWorldBegin
-    KwWorldEnd
-    KwAttributeBegin
-    KwAttributeEnd
-    KwShape
-    KwMaterial
-    KwTexture
-    KwTranslate
-    KwLightSource
 }
 
 #file_scope

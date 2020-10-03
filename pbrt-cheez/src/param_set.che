@@ -5,22 +5,25 @@ use import std.math
 use import std.rc
 use import std.printable
 
-use import math
-
 fmt :: import std.fmt
+
+use import math
+use import spectrum
+use import texture
+use import material
 
 #export_scope
 
 ParamSet :: struct {
-    bools   := Array[Rc[ParamSetItem[bool]]].new()
-    ints    := Array[Rc[ParamSetItem[int]]].new()
-    floats  := Array[Rc[ParamSetItem[real]]].new()
-    vec2s   := Array[Rc[ParamSetItem[vec2]]].new()
-    vec3s   := Array[Rc[ParamSetItem[vec3]]].new()
-    vec4s   := Array[Rc[ParamSetItem[vec4]]].new()
-    strings := Array[Rc[ParamSetItem[String]]].new()
-    spectra := Array[Rc[ParamSetItem[Spectrum]]].new()
-    textures := Array[Rc[ParamSetItem[String]]].new()
+    bools       := Array[Rc[ParamSetItem[bool]]].new()
+    ints        := Array[Rc[ParamSetItem[int]]].new()
+    floats      := Array[Rc[ParamSetItem[real]]].new()
+    vec2s       := Array[Rc[ParamSetItem[vec2]]].new()
+    vec3s       := Array[Rc[ParamSetItem[vec3]]].new()
+    vec4s       := Array[Rc[ParamSetItem[vec4]]].new()
+    strings     := Array[Rc[ParamSetItem[String]]].new()
+    spectra     := Array[Rc[ParamSetItem[Spectrum]]].new()
+    textures    := Array[Rc[ParamSetItem[String]]].new()
 }
 
 impl ParamSet {
@@ -63,23 +66,42 @@ impl ParamSet {
         }
 
         match T {
-            bool    -> replace(&mut self.bools, ParamSetItem[T].new(name, values))
-            int     -> replace(&mut self.ints, ParamSetItem[T].new(name, values))
-            real    -> replace(&mut self.floats, ParamSetItem[T].new(name, values))
-            vec2    -> replace(&mut self.vec2s, ParamSetItem[T].new(name, values))
-            vec3    -> replace(&mut self.vec3s, ParamSetItem[T].new(name, values))
-            vec4    -> replace(&mut self.vec4s, ParamSetItem[T].new(name, values))
-            String  -> replace(&mut self.strings, ParamSetItem[T].new(name, values))
+            bool    -> replace(&mut self.bools, ParamSetItem[T].from_slice(name, values))
+            int     -> replace(&mut self.ints, ParamSetItem[T].from_slice(name, values))
+            real    -> replace(&mut self.floats, ParamSetItem[T].from_slice(name, values))
+            vec2    -> replace(&mut self.vec2s, ParamSetItem[T].from_slice(name, values))
+            vec3    -> replace(&mut self.vec3s, ParamSetItem[T].from_slice(name, values))
+            vec4    -> replace(&mut self.vec4s, ParamSetItem[T].from_slice(name, values))
+            String  -> replace(&mut self.strings, ParamSetItem[T].from_slice(name, values))
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
     }
 
-    get :: (&mut Self, $T: type, name: string) -> Option[&T] {
-        get_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> Option[&T] {
-            for &mut item in arr.slice_mut() {
+    add_rgb_spectrum :: (&mut Self, name: string, values: []vec3) {
+        spectra := Array[Spectrum].new(values.length)
+        for v in values {
+            spectra.add(Spectrum.from_rgb(v))
+        }
+
+        new_item := ParamSetItem[Spectrum].from_array(name, spectra)
+
+        // replace if existing
+        for &mut item in self.spectra.slice_mut() {
+            if item.get().name.slice() == new_item.get().name.slice() {
+                *item = new_item
+                return
+            }
+        }
+
+        self.spectra.add(new_item)
+    }
+
+    get :: (&Self, $T: type, name: string) -> Option[&T] {
+        get_impl :: (arr: &Array[Rc[ParamSetItem[$T]]], name: string) -> Option[&T] {
+            for &item in arr.slice() {
                 if item.get().name.slice() == name {
                     @assert(item.get().values.count() == 1)
-                    item.get_mut().used = true
+                    item.get().set_used()
                     return Some(item.get().values[0])
                 }
             }
@@ -94,15 +116,27 @@ impl ParamSet {
             vec3    -> get_impl(&self.vec3s, name)
             vec4    -> get_impl(&self.vec4s, name)
             String  -> get_impl(&self.strings, name)
+            Spectrum -> get_impl(&self.spectra, name)
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
     }
 
-    get_n :: (&mut Self, $T: type, name: string) -> Option[[]T] {
-        get_impl :: (arr: &mut Array[Rc[ParamSetItem[$T]]], name: string) -> Option[[]T] {
-            for &mut item in arr.slice_mut() {
+    get_texture :: (&Self, name: string) -> Option[&String] {
+        for &item in textures.slice() {
+            if item.get().name.slice() == name {
+                @assert(item.get().values.count() == 1)
+                item.get().set_used()
+                return Some(item.get().values[0])
+            }
+        }
+        return None
+    }
+
+    get_n :: (&Self, $T: type, name: string) -> Option[[]T] {
+        get_impl :: (arr: &Array[Rc[ParamSetItem[$T]]], name: string) -> Option[[]T] {
+            for &item in arr.slice() {
                 if item.get().name.slice() == name {
-                    item.get_mut().used = true
+                    item.get().set_used()
                     return Some(item.get().values[..])
                 }
             }
@@ -117,6 +151,7 @@ impl ParamSet {
             vec3    -> get_impl(&self.vec3s, name)
             vec4    -> get_impl(&self.vec4s, name)
             String  -> get_impl(&self.strings, name)
+            Spectrum -> get_impl(&self.spectra, name)
             _       -> @static_assert(false, "Invalid type for parameter 'values': []" + @typename(T))
         }
     }
@@ -166,6 +201,8 @@ impl Printable for ParamSet {
         print_arr("vec3s", &self.vec3s, result)
         print_arr("vec4s", &self.vec4s, result)
         print_arr("strings", &self.strings, result)
+        print_arr("spectra", &self.spectra, result)
+        print_arr("textures", &self.textures, result)
         result.append_string(")")
     }
 }
@@ -177,21 +214,122 @@ ParamSetItem :: struct(T: type) {
 }
 
 impl(T: type) ParamSetItem[T] {
-    new :: (name: string, values: []T) -> Rc[Self] {
+    from_slice :: (name: string, values: []T) -> Rc[Self] {
+        @assert(values.length > 0)
         return Rc[Self].new(Self(
             name    = name.to_owned()
             values  = Array[T].from_slice(values)
             used    = false
         ))
     }
+
+    from_array :: (name: string, values: Array[T]) -> Rc[Self] {
+        @assert(values.length > 0)
+        return Rc[Self].new(Self(
+            name    = name.to_owned()
+            values  = values
+            used    = false
+        ))
+    }
+
+    set_used :: (&Self) {
+        @cast(&mut Self, self).used = true
+    }
 }
 
 impl(T: type) Printable for ParamSetItem[T] {
     print :: (&Self, result: &mut String, format: string) {
         if self.values.count() == 1 {
-            fmt.format_into(result, "`"{} {}`" {}", [@typename(T), self.name.slice(), *self.values[0]])
+            fmt.format_into(result, "`"{}`" {}", [self.name.slice(), *self.values[0]])
         } else {
-            fmt.format_into(result, "`"{} {}`" {}", [@typename(T), self.name.slice(), self.values[..]])
+            fmt.format_into(result, "`"{}`" {}", [self.name.slice(), self.values[..]])
+        }
+    }
+}
+
+TextureParams :: struct {
+    float_textures      : &mut Map[string, Rc[Texture[real]]]
+    spectrum_textures   : &mut Map[string, Rc[Texture[Spectrum]]]
+    geom_params         : &ParamSet
+    material_params     : &ParamSet
+}
+
+impl TextureParams {
+    get :: (&Self, $T: type, name: string) -> Option[&T] {
+        return geom_params.get(T, name).map_none(material_params.get(T, name))
+    }
+
+    get_float_texture :: (&Self, name: string, def: real) -> Rc[Texture[real]] {
+        return match self.get_float_texture_or_null(name) {
+            Some($tex) -> tex
+            None -> Rc[Texture[real]].new(ConstantTexture[real].new(def))
+        }
+    }
+
+    get_float_texture_or_null :: (&Self, name: string) -> Option[Rc[Texture[real]]] {
+        try_get_from_params :: (params: &ParamSet, name: string) #macro {
+            match params.get_texture(name) {
+                Some($tex_name) -> Some(tex_name)
+
+                None -> match params.get_n(real, name) {
+                    Some($values) -> {
+                        if values.length > 1 {
+                            // @todo: warn
+                        }
+
+                        return Some(Rc[Texture[real]].new(ConstantTexture[real].new(*values[0])))
+                    }
+
+                    None -> Option[&String].None
+                }
+            }
+        }
+
+        mut tex_name := try_get_from_params(self.geom_params, name)
+        if tex_name.is_none() {
+            tex_name = try_get_from_params(self.material_params, name)
+        }
+
+        return match tex_name {
+            Some($tex_name) -> float_textures.get(tex_name.slice()).map((tex: &mut Rc[Texture[real]]) => tex.clone())
+            None            -> None
+        }
+    }
+
+    get_spectrum_texture :: (&Self, name: string, def: Spectrum) -> Rc[Texture[Spectrum]] {
+        return match self.get_spectrum_texture_or_null(name) {
+            Some($tex) -> tex
+            None -> Rc[Texture[Spectrum]].new(ConstantTexture[Spectrum].new(def))
+        }
+    }
+
+    get_spectrum_texture_or_null :: (&Self, name: string) -> Option[Rc[Texture[Spectrum]]] {
+        try_get_from_params :: (params: &ParamSet, name: string) #macro {
+            match params.get_texture(name) {
+                Some($tex_name) -> Some(tex_name)
+
+                None -> match params.get_n(Spectrum, name) {
+                    Some($values) -> {
+                        if values.length > 1 {
+                            // @todo: warn
+                        }
+
+                        return Some(Rc[Texture[Spectrum]].new(ConstantTexture[Spectrum].new(*values[0])))
+                    }
+
+                    None -> Option[&String].None
+                }
+            }
+        }
+
+        mut tex_name := try_get_from_params(self.geom_params, name)
+        if tex_name.is_none() {
+            tex_name = try_get_from_params(self.material_params, name)
+        }
+
+        return match tex_name {
+            Some($tex_name) -> spectrum_textures.get(tex_name.slice()).map((tex: &mut Rc[Texture[Spectrum]]) => tex.clone())
+            None            -> None
         }
     }
 }
