@@ -56,12 +56,24 @@ impl HelloTriangleApplication {
         if args.length == 0 {
             args = ["../assets/meshes/bunny.obj".to_owned()]
         }
-        shaders := [
-            try(vk.Shader.new(&self.context.device, "triangle.vert.spv"))
-            try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
-        ]
-        defer { for &mut shader in shaders[..] do shader.destroy(self.context.device.handle) }
-        self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..]))
+        // shaders := [
+        //     try(vk.Shader.new(&self.context.device, "triangle.vert.spv"))
+        //     try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
+        // ]
+        // defer { for &mut shader in shaders[..] do shader.destroy(self.context.device.handle) }
+        graphics_pipeline := Rc[vk.GraphicsPipeline].new(vk.GraphicsPipeline.new(
+            cache       = self.pipeline_cache
+            spec        = vk.GraphicsPipelineSpec(
+                shaders = Array[String].from_slice([
+                    "triangle.vert.spv".to_owned()
+                    "triangle.frag.spv".to_owned()
+                ])
+            )
+        ))
+        try(graphics_pipeline.get_mut().create(&self.context.device, self.render_pass))
+        try(graphics_pipeline.get_mut().create_frame_descriptors(MaxFramesInFlight, self.descriptor_pool))
+        self.pipeline_editor.pipeline = graphics_pipeline.clone()
+        self.pipelines.add(graphics_pipeline)
 
         for i in 0 .. MaxFramesInFlight {
             semaphore_info := VkSemaphoreCreateInfo(
@@ -73,7 +85,7 @@ impl HelloTriangleApplication {
                 flags = .SignaledBit
             )
 
-            mut frame := FrameData()
+            mut frame := FrameData(index = it_index)
             vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_acquire))
             vk_assert(vkCreateSemaphore(self.context.device.handle, ^semaphore_info, null, ^mut frame.sema_render))
             vk_assert(vkCreateFence(self.context.device.handle, ^fence_info, null, ^mut frame.fence_draw_done))
@@ -99,15 +111,6 @@ impl HelloTriangleApplication {
             vk_try(vkMapMemory(self.context.device.handle, frame.draw_data_buffer.get().memory, 0, @sizeof(DrawData), .None, cast ^mut frame.draw_data))
             *frame.draw_data = DrawData()
 
-            descriptor_set_layouts := [self.graphics_pipeline.frame_set_layout]
-            descriptor_alloc_info := VkDescriptorSetAllocateInfo(
-                sType               = .DescriptorSetAllocateInfo
-                descriptorPool      = self.descriptor_pool
-                descriptorSetCount  = cast descriptor_set_layouts.length
-                pSetLayouts         = descriptor_set_layouts.data
-            )
-            vk_try(vkAllocateDescriptorSets(self.context.device.handle, ^descriptor_alloc_info, ^mut frame.frame_descriptor_set))
-
             self.frames.add(frame)
         }
 
@@ -128,13 +131,14 @@ impl HelloTriangleApplication {
 
     load_mesh :: (&mut Self, mesh_file: string) -> Result[Rc[Mesh], String] {
         io.formatln("loading mesh {}...", [mesh_file])
-        new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, self.graphics_pipeline.mesh_set_layout, self.descriptor_pool, mesh_file)))
+        // new_mesh := Rc[Mesh].new(try(Mesh.from_file(&self.context.device, self.graphics_pipeline.mesh_set_layout, self.descriptor_pool, mesh_file)))
 
         self.mesh_file.append_string(mesh_file)
         self.mesh_file.as_cstring()
         self.mesh_file.clear()
 
-        return Ok(new_mesh)
+        // return Ok(new_mesh)
+        return Err("TODO".to_owned())
     }
 
     on_render :: (&mut Self, frame: &FrameData, framebuffer: VkFramebuffer, image: VkImage, depth: VkImage) {
@@ -146,7 +150,6 @@ impl HelloTriangleApplication {
         if self.camera_perspective {
             frame.draw_data.view = mat4.from_translation(vec3(0, 0, -self.camera_distance)) * mat4.from_rotation_x(radians(-self.camera_pitch)) * mat4.from_rotation_y(radians(-self.camera_yaw))
             frame.draw_data.proj = mat4.perspective_reverse_z(0.001, radians(self.camera_fov), aspect_ratio, true)
-            // frame.draw_data.proj = mat4.perspective(0.001, 1000, radians(self.camera_fov), aspect_ratio, true)
         } else {
             frame.draw_data.view = mat4.from_rotation_x(radians(-self.camera_pitch)) * mat4.from_rotation_y(radians(-self.camera_yaw))
             d := self.camera_distance
@@ -167,7 +170,8 @@ impl HelloTriangleApplication {
             descriptorType = .UniformBuffer
             pBufferInfo = ^draw_data_info
         )
-        vkUpdateDescriptorSets(self.context.device.handle, 1, &write_frame_descriptor_set, 0, null)
+        // TODO
+        // vkUpdateDescriptorSets(self.context.device.handle, 1, &write_frame_descriptor_set, 0, null)
         sema_render := [frame.sema_render]
 
         sema_acquire := [frame.sema_acquire]
@@ -231,34 +235,41 @@ impl HelloTriangleApplication {
         )
 
         vkCmdBeginRenderPass(frame.command_buffer, ^render_pass_info, .Inline)
-        vkCmdBindPipeline(frame.command_buffer, .Graphics, self.graphics_pipeline.handle)
-        vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 0, 1, ^frame.frame_descriptor_set, 0, null)
-        
-        viewport := VkViewport(
-            x        = 0.0
-            y        = 0.0
-            width    = cast(float) self.swapchain.get().extent.width
-            height   = cast(float) self.swapchain.get().extent.height
-            minDepth = 0.0
-            maxDepth = 1.0
-        )
 
-        scissor := VkRect2D(
-            offset = VkOffset2D(0, 0)
-            extent = self.swapchain.get().extent
-        )
+        self.current_pipeline = self.current_pipeline % i32(self.pipelines.count())
+        if self.pipelines.count() > 0 and self.pipelines[int(self.current_pipeline)].get().handle != null {
+            pipeline := self.pipelines[int(self.current_pipeline)].get()
 
-        vkCmdSetViewport(frame.command_buffer, 0, 1, ^viewport)
-        vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
+            vkCmdBindPipeline(frame.command_buffer, .Graphics, pipeline.handle)
+            vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, pipeline.layout, 0, 1, ^*pipeline.get_frame_descriptors()[frame.index], 0, null)
+            
+            viewport := VkViewport(
+                x        = 0.0
+                y        = 0.0
+                width    = cast(float) self.swapchain.get().extent.width
+                height   = cast(float) self.swapchain.get().extent.height
+                minDepth = 0.0
+                maxDepth = 1.0
+            )
 
-        vertex_buffer_offset : VkDeviceSize = 0
+            scissor := VkRect2D(
+                offset = VkOffset2D(0, 0)
+                extent = self.swapchain.get().extent
+            )
 
-        if self.meshes.count() > 0 {
-            i := int(self.current_mesh) % self.meshes.count()
-            mesh := self.meshes[i]
-            vkCmdBindIndexBuffer(frame.command_buffer, mesh.get().index_buffer.handle, 0, .Uint32)
-            vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, self.graphics_pipeline.layout, 1, 1, ^mesh.get().descriptor_set, 0, null)
-            vkCmdDrawIndexed(frame.command_buffer, cast mesh.get().index_count, 1, 0, 0, 0)
+            vkCmdSetViewport(frame.command_buffer, 0, 1, ^viewport)
+            vkCmdSetScissor(frame.command_buffer, 0, 1, ^scissor)
+
+            vertex_buffer_offset : VkDeviceSize = 0
+
+            if self.meshes.count() > 0 {
+                i := int(self.current_mesh) % self.meshes.count()
+                // mesh := self.meshes[i]
+                // vkCmdBindIndexBuffer(frame.command_buffer, mesh.get().index_buffer.handle, 0, .Uint32)
+                // TODO
+                // vkCmdBindDescriptorSets(frame.command_buffer, .Graphics, pipeline.layout, 1, 1, ^mesh.get().descriptor_set, 0, null)
+                // vkCmdDrawIndexed(frame.command_buffer, cast mesh.get().index_count, 1, 0, 0, 0)
+            }
         }
 
         // render imgui stuff into command buffer
@@ -364,6 +375,12 @@ impl HelloTriangleApplication {
 
             imgui.ColorEdit3("Clear color", self.clear_color.data, .RGB)
 
+            imgui.Combo_3("Current Pipeline", ^mut self.current_pipeline, (data, i, label) => {
+                pipelines := @cast(^Array[Rc[vk.GraphicsPipeline]], data).slice()
+                *label = pipelines[int(i)].get().spec.name.as_cstring()
+                true
+            }, ^self.pipelines, cast self.pipelines.count(), -1)
+
             imgui.Combo_3("Current mesh", ^mut self.current_mesh, (data, i, label) => {
                 meshes := @cast(^Array[Rc[Mesh]], data).slice()
                 *label = meshes[int(i)].get().name.as_cstring()
@@ -388,6 +405,9 @@ impl HelloTriangleApplication {
             // }
 
         }
+
+        self.pipeline_editor.render(&self.context.device, self.render_pass, MaxFramesInFlight, self.descriptor_pool)
+
         if !imgui.IsWindowFocused(.AnyWindow) {
             mouse_drag_delta := imgui.GetMouseDragDelta(.Left, 0.1)
             imgui.ResetMouseDragDelta(.Left)
@@ -497,6 +517,8 @@ impl HelloTriangleApplication {
 
     on_cleanup :: (&mut Self) {
         io.formatln("cleanup()")
-        self.graphics_pipeline.destroy()
+        for &pipeline in self.pipelines[..] {
+            pipeline.get().destroy()
+        }
     }
 }

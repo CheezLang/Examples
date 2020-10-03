@@ -29,6 +29,7 @@ clap :: import clap.clap
 use import obj
 use import app
 use import mesh
+use import editor
 
 mat4 :: Matrix4[f32]
 vec2 :: Vector2[f32]
@@ -196,6 +197,7 @@ impl VulkanContext {
 }
 
 FrameData :: struct {
+    index           : int
     command_buffer  : VkCommandBuffer = default
     sema_acquire    : VkSemaphore = default
     sema_render     : VkSemaphore = default
@@ -243,7 +245,8 @@ HelloTriangleApplication :: struct {
     descriptor_pool         : VkDescriptorPool = null
     command_pool            : VkCommandPool = null
 
-    graphics_pipeline       : vk.GraphicsPipeline = default
+    current_pipeline        : i32 = 0
+    pipelines               := Array[Rc[vk.GraphicsPipeline]].new()
 
     frames                  := Array[FrameData].new()
     frame_statistics        := FrameStatistics()
@@ -266,6 +269,8 @@ HelloTriangleApplication :: struct {
     scroll_speed            := 0.2f
     mouse_sensitivity       := 0.5f
     camera_fov              := 50.0f
+
+    pipeline_editor         := PipelineEditor()
 }
 
 impl HelloTriangleApplication {
@@ -282,7 +287,6 @@ impl HelloTriangleApplication {
         try(self.init_vulkan())
 
         try(self.on_init(args))
-
 
         // imgui setup
         try(self.init_imgui(window))
