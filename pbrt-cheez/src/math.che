@@ -1,0 +1,42 @@
+use import std.math
+use import std.matrix
+
+#export_scope
+
+real :: f32
+
+vec2 :: Vector2[real]
+vec3 :: Vector3[real]
+vec4 :: Vector4[real]
+mat4 :: Matrix4[real]
+
+Transform :: struct #copy #align(16) {
+    m       := mat4.id()
+    m_inv   := mat4.id()
+}
+
+impl Transform {
+    new :: (m: mat4) -> Transform {
+        return Transform(m, m.inverse())
+    }
+
+    look_at :: (eye: vec3, target: vec3, up: vec3) -> Transform {
+        camera_to_world := mat4.look_at(eye, target, up)
+        return Transform(camera_to_world.inverse(), camera_to_world)
+    }
+
+    mul :: (&Self, other: &Transform) -> Transform #operator("*") {
+        return Transform(
+            self.m * other.m
+            other.m_inv * self.m_inv
+        )
+    }
+
+    mult :: (&mut Self, other: &Transform) #operator("*=") {
+        *self = self * other
+    }
+
+    inverse :: (&Self) -> Transform {
+        return Transform(m_inv, m)
+    }
+}

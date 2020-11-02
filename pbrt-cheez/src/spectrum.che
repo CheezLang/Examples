@@ -1,0 +1,33 @@
+use import std.math
+
+use import math
+
+#export_scope
+
+SAMPLED_LAMBDA_START :: 400
+SAMPLED_LAMBDA_END   :: 700
+SPECTRAL_SAMPLES     :: 60
+
+CoefficientSpectrum :: trait(Samples: int) {
+    c : [Samples]real
+}
+
+SampledSpectrum :: struct CoefficientSpectrum[SPECTRAL_SAMPLES] #copy {
+
+}
+
+RGBSpectrum :: struct CoefficientSpectrum[3] #copy {
+
+}
+
+impl RGBSpectrum {
+    new :: (value: real) -> RGBSpectrum {
+        return RGBSpectrum([value, value, value])
+    }
+
+    from_rgb :: (value: vec3) -> RGBSpectrum {
+        return RGBSpectrum([value.x, value.y, value.z])
+    }
+}
+
+Spectrum :: RGBSpectrum

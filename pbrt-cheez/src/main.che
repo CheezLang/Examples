@@ -1,0 +1,72 @@
+use import std.array
+use import std.string
+use import std.profiling
+use import std.math
+use import std.matrix
+
+fmt :: import std.fmt
+io  :: import std.io
+fs  :: import std.io.fs
+
+clap :: import clap.clap
+
+use import pbrt
+use import scene_parser
+use import core
+
+Arguments :: struct {
+    #help("Number of threads to use while rendering")
+    threads := 1
+
+    #help("Path of the generated output image") 
+    out : String
+
+    #help("Path to scene file (.scn)")
+    scene : String
+
+    #help("Enable logging")
+    log := false
+}
+
+Main :: () {
+    Instrumentor.init(thread_safe = true)
+    Instrumentor.get().begin_session("pbrt-cheez", "pbrt-cheez.json")
+    defer Instrumentor.get().end_session()
+
+    match app_main() {
+        Ok() -> {}
+        Err($msg) -> {
+            io.formatln("[ERROR] {}", [msg.slice()])
+        }
+    }
+
+    io.formatln("Done")
+}
+
+app_main :: () -> Result[(), String] {
+    profile_function()
+    args := {
+        profile_scope("parse_cmd_arguments()")
+        clap.parse_cmd_arguments(Arguments)
+    }
+    match args {
+        Ok($args) -> {
+            // io.formatln("{}", [&args])
+            enable_logging = args.log
+
+            text := {
+                profile_scope("read_file()")
+                try(fs.read_file(args.scene.slice()))
+            }
+
+            mut pbrt := Pbrt.new()
+
+            try(Parser.parse(text.slice(), &mut pbrt))
+        }
+        Err(_) -> {
+            help := clap.get_help_message(@type_info(Arguments))
+            io.formatln("Failed to parse arguments. {}", [help.slice()])
+        }
+    }
+    return Ok()
+}

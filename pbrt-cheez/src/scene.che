@@ -1,0 +1,22 @@
+use import std.mem.arena_allocator
+use import std.array
+use import std.string
+
+mem :: import std.mem.allocator
+io  :: import std.io
+fmt :: import std.fmt
+fs  :: import std.io.fs
+
+use import scene_parser
+
+#export_scope
+
+Scene :: struct {
+    
+}
+
+impl Scene {
+    empty :: () -> Scene {
+        return Scene()
+    }
+}

@@ -1,0 +1,7 @@
+use import scene
+
+#export_scope
+
+Integrator :: trait {
+    render :: (&Self, scene: &Scene);
+}
