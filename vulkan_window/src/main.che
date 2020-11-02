@@ -61,7 +61,13 @@ impl HelloTriangleApplication {
             try(vk.Shader.new(&self.context.device, "triangle.frag.spv"))
         ]
         defer { for &mut shader in shaders[..] do shader.destroy(self.context.device.handle) }
-        self.graphics_pipeline = try(vk.GraphicsPipeline.new(&self.context.device, self.pipeline_cache, self.render_pass, shaders[..]))
+        self.graphics_pipeline = vk.GraphicsPipeline.new(self.pipeline_cache, vk.GraphicsPipelineSpec(
+            shaders = Array[String].from_slice([
+                "triangle.vert.spv".to_owned()
+                "triangle.frag.spv".to_owned()
+            ])
+        ))
+        try(self.graphics_pipeline.create(&self.context.device, self.render_pass))
 
         for i in 0 .. MaxFramesInFlight {
             semaphore_info := VkSemaphoreCreateInfo(
@@ -114,9 +120,24 @@ impl HelloTriangleApplication {
         mesh_files := clap.parse_arguments(Array[String], args)
         if mesh_files != null {
             for &file in mesh_files.slice() {
-                match self.load_mesh(file.slice()) {
-                    Ok($mesh) -> self.meshes.add(mesh)
-                    Err($msg) -> io.formatln("{}", [msg.slice()])
+                if fs.Path.is_directory(file.slice()) {
+                    files := try_with(fs.get_items_in_directory(file.slice(), .Files), {
+                        io.formatln("Failed to enumerate files in directory '{}'", [file.slice()])
+                        Array[String].new()
+                    })
+                    io.formatln("files: {}", [files.slice()])
+                    for &name in files[..] {
+                        path := fmt.format("{}/{}", [file.slice(), name.slice()])
+                        match self.load_mesh(path.slice()) {
+                            Ok($mesh) -> self.meshes.add(mesh)
+                            Err($msg) -> io.formatln("{}", [msg.slice()])
+                        }
+                    }
+                } else {
+                    match self.load_mesh(file.slice()) {
+                        Ok($mesh) -> self.meshes.add(mesh)
+                        Err($msg) -> io.formatln("{}", [msg.slice()])
+                    }
                 }
             }
         } else {
