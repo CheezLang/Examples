@@ -1,0 +1,99 @@
+use import std.array
+use import std.map
+use import std.box
+use import std.string
+use import std.math
+use import std.matrix
+use import std.rc
+use import std.thread
+
+mem :: import std.mem.allocator
+fmt :: import std.fmt
+io  :: import std.io
+C   :: import std.c
+fs  :: import std.io.fs
+
+use import glfw
+
+use import vulkan
+use import vulkan_utils
+use import spirv_cross
+vk :: import vulkan_hl
+
+use import imgui_glfw
+use import imgui_vulkan
+imgui :: import imgui
+
+clap :: import clap.clap
+
+use import obj
+use import app
+use import mesh
+
+mat4 :: Matrix4[f32]
+vec2 :: Vector2[f32]
+vec3 :: Vector3[f32]
+vec4 :: Vector4[f32]
+
+#export_scope
+
+PipelineEditor :: struct {
+    pipeline := Rc[vk.GraphicsPipeline].empty()
+}
+
+impl PipelineEditor {
+    render :: (&mut Self, device: &vk.Device, render_pass: VkRenderPass, frame_count: int, descriptor_pool: VkDescriptorPool) {
+        if self.pipeline.is_null() {
+            return
+        }
+
+        pipeline := self.pipeline.get_mut()
+
+        mut open := true
+        imgui.Begin("Pipeline", ^mut open, .None)
+        defer imgui.End()
+
+        pipeline.spec.name.reserve(256)
+        if imgui.InputText("Name"c, cast pipeline.spec.name.as_cstring(), cast pipeline.spec.name.get_capacity(), .None, null, null) {
+            pipeline.spec.name.resize(cast C.strlen(cast pipeline.spec.name.get_raw()))
+        }
+
+        Editor.input_array("Shaders"c, &mut pipeline.spec.shaders, (shader_name, i) => {
+            shader_name.reserve(256)
+            imgui.PushIDInt(i32(i))
+            defer imgui.PopID()
+            if imgui.InputText(""c, cast shader_name.as_cstring(), cast shader_name.get_capacity(), .None, null, null) {
+                shader_name.resize(cast C.strlen(cast shader_name.get_raw()))
+            }
+        })
+
+        imgui.Separator()
+        if imgui.SmallButton("Apply") {
+            // 
+            match pipeline.recreate(device, render_pass) {
+                Ok() -> {
+                    pipeline.create_frame_descriptors(frame_count, descriptor_pool)
+                }
+                Err($err) -> {
+                    io.formatln("failed to recreate swapchain: {}", [err])
+                }
+            }
+        }
+    }
+}
+
+Editor :: struct {}
+impl Editor {
+    input_array :: (name: ^char8, arr: &mut Array[$T], func: fn(&mut T, int), new: fn() -> T = null) {
+        if imgui.TreeNodeEx(name, .DefaultOpen) {
+            defer imgui.TreePop()
+
+            for &mut value in arr.slice_mut() {
+                func(value, it_index)
+            }
+            if new != null and imgui.SmallButton("+") {
+                arr.add(new())
+            }
+        }
+    }
+}

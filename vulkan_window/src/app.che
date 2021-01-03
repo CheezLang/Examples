@@ -26,6 +26,7 @@ imgui :: import imgui
 
 clap :: import clap.clap
 
+use import editor
 use import obj
 use import app
 use import mesh
@@ -196,6 +197,7 @@ impl VulkanContext {
 }
 
 FrameData :: struct {
+    index           : int
     command_buffer  : VkCommandBuffer = default
     sema_acquire    : VkSemaphore = default
     sema_render     : VkSemaphore = default
@@ -257,6 +259,10 @@ HelloTriangleApplication :: struct {
     meshes                  := Array[Rc[Mesh]].new()
     current_mesh            : i32 = 0
 
+    pipelines               := Array[Rc[vk.GraphicsPipeline]].new()
+    pipeline_editor         := PipelineEditor()
+    current_pipeline        : i32 = 0
+
     camera_pitch            := 0.0f
     camera_yaw              := 0.0f
     camera_distance         := 2.0f
@@ -282,7 +288,6 @@ impl HelloTriangleApplication {
         try(self.init_vulkan())
 
         try(self.on_init(args))
-
 
         // imgui setup
         try(self.init_imgui(window))
